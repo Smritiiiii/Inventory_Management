@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import api from "../api/axios";
 import { fetchAllPages } from "../utils/paginated";
+import { isCurrentUserAdmin } from "../utils/auth";
+import { formatAuditTimestamp } from "../utils/audit";
+
+const STATIC_CATEGORY_NAMES = ["cylinder", "accessory"];
 
 /* ── shared design system (mirrors Supplier.jsx) ── */
 const styles = `
@@ -149,8 +153,29 @@ const styles = `
     transition: opacity .15s, transform .15s;
   }
   .ct-action-btn:hover { opacity: .8; transform: scale(1.1); }
+  .ct-action-btn:disabled,
+  .ct-action-btn:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    transform: none;
+  }
   .ct-btn-edit   { background: #fff3cd; color: #856404; }
   .ct-btn-delete { background: #fdecea; color: #c0392b; }
+
+  .ct-audit {
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+  .ct-audit-user {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  .ct-audit-time {
+    font-size: .75rem;
+    color: #777;
+  }
 
   /* ── form card ── */
   .ct-form-wrap {
@@ -320,6 +345,7 @@ export default function Category() {
   const [loading, setLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
+  const isAdmin = isCurrentUserAdmin();
 
   const loadCategories = async () => {
     try {
@@ -343,6 +369,10 @@ export default function Category() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (editingId && !isAdmin) {
+      alert("Only admins can edit item types.");
+      return;
+    }
     if (!formData.category || !formData.name.trim()) {
       alert("Please fill in both fields");
       return;
@@ -354,7 +384,7 @@ export default function Category() {
       selectedCategory?.name?.trim().toLowerCase() === "accessory";
     try {
       const payload = {
-        category: formData.category,
+        category: Number(formData.category),
         name: formData.name,
         quantity: isAccessoryCategory ? Number(formData.quantity || 0) : 0,
       };
@@ -380,6 +410,10 @@ export default function Category() {
   };
 
   const handleEdit = (itemType) => {
+    if (!isAdmin) {
+      alert("Only admins can edit item types.");
+      return;
+    }
     setFormData({
       category: itemType.category,
       name: itemType.name,
@@ -390,6 +424,10 @@ export default function Category() {
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert("Only admins can delete item types.");
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this item type?")) return;
     try {
       await api.delete(`/api/item-types/${id}/`);
@@ -425,11 +463,14 @@ export default function Category() {
   const selectedCategory = categories.find(
     (category) => String(category.id) === String(formData.category)
   );
+  const staticCategoryOptions = STATIC_CATEGORY_NAMES.map((categoryName) =>
+    categories.find(
+      (category) => category.name?.trim().toLowerCase() === categoryName
+    )
+  ).filter(Boolean);
+  const categoryOptions = staticCategoryOptions.length > 0 ? staticCategoryOptions : categories;
   const isAccessoryCategory =
     selectedCategory?.name?.trim().toLowerCase() === "accessory";
-
-  // summary stats
-  const uniqueCategories = [...new Set(itemTypes.map((it) => it.category))].length;
 
   // Pagination logic
   const totalPages = Math.ceil(itemTypes.length / itemsPerPage);
@@ -481,7 +522,7 @@ export default function Category() {
                           required
                         >
                           <option value="">Select Category</option>
-                          {categories.map((cat) => (
+                          {categoryOptions.map((cat) => (
                             <option key={cat.id} value={cat.id}>
                               {cat.name}
                             </option>
@@ -499,8 +540,8 @@ export default function Category() {
                         name="name"
                         placeholder={
                           isAccessoryCategory
-                            ? "e.g. Regulator, Pipe, Stove"
-                            : "e.g. Nitrogen, Oxygen, LPG"
+                            ? "e.g. Regulator, Mask"
+                            : "e.g. Nitrogen, Oxygen"
                         }
                         value={formData.name}
                         onChange={handleChange}
@@ -549,29 +590,6 @@ export default function Category() {
           </button>
         </div>
 
-        {/* ── summary strip ── */}
-        {/* {itemTypes.length > 0 && (
-          <div className="ct-summary">
-            <div className="ct-stat">
-              <div className="ct-stat-label">Total Item Types</div>
-              <div className="ct-stat-value">{itemTypes.length}</div>
-            </div>
-            <div className="ct-stat">
-              <div className="ct-stat-label">Categories Used</div>
-              <div className="ct-stat-value">{uniqueCategories}</div>
-            </div>
-            <div className="ct-stat">
-              <div className="ct-stat-label">Recent Item Types</div>
-              <div className="ct-recent-badges">
-                {itemTypes.slice(-3).map((it) => (
-                  <span key={it.id} className="ct-badge ct-badge-type">
-                    {it.name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        )} */}
 
         {/* ── table ── */}
         <div className="ct-table-card">
@@ -588,13 +606,14 @@ export default function Category() {
                   <th>Category</th>
                   <th>Item Type Name</th>
                   <th>Quantity</th>
+                  <th>Audit Trail</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {paginatedItemTypes.length === 0 ? (
                   <tr>
-                    <td colSpan="4">
+                    <td colSpan="5">
                       <div className="ct-empty">
                         <div className="ct-empty-icon">🏷️</div>
                         No item types found. Add your first item type!
@@ -616,17 +635,29 @@ export default function Category() {
                       </td>
                       <td>{itemType.quantity || "—"}</td>
                       <td>
+                        <div className="ct-audit">
+                          <span className="ct-audit-user">
+                            {itemType.created_by_name || "Not recorded"}
+                          </span>
+                          <span className="ct-audit-time">
+                            {formatAuditTimestamp(itemType.created_at)}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
                         <button
                           className="ct-action-btn ct-btn-edit"
                           onClick={() => handleEdit(itemType)}
-                          title="Edit"
+                          title={isAdmin ? "Edit" : "Admin only"}
+                          disabled={!isAdmin}
                         >
                           <i className="bi bi-pencil-fill"></i> E
                         </button>{" "}
                         <button
                           className="ct-action-btn ct-btn-delete"
                           onClick={() => handleDelete(itemType.id)}
-                          title="Delete"
+                          title={isAdmin ? "Delete" : "Admin only"}
+                          disabled={!isAdmin}
                         >
                           <i className="bi bi-trash-fill"></i> D
                         </button>

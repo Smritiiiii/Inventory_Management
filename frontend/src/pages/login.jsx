@@ -96,6 +96,35 @@ const styles = `
     justify-content: center;
   }
 
+  .r-tabs {
+    display: flex;
+    gap: 2rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid #DDD9D2;
+    padding-bottom: 0;
+  }
+
+  .r-tab {
+    padding: 0.75rem 0;
+    cursor: pointer;
+    font-size: .8rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: #B0AA9F;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+  }
+
+  .r-tab.active {
+    color: #c0392b;
+    border-bottom-color: #c0392b;
+  }
+
+  .r-tab:hover {
+    color: #8a8580;
+  }
+
   .r-step {
     display: flex; align-items: center; gap: .6rem;
     margin-bottom: 2.25rem;
@@ -129,6 +158,29 @@ const styles = `
   .r-input::placeholder { color: #B8B3AA; }
   .r-input:focus { background: #fff; border-color: #c0392b; }
   .r-input:disabled { opacity: .4; cursor: not-allowed; }
+
+  .r-checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1.65rem 0;
+  }
+
+  .r-checkbox {
+    width: 20px;
+    height: 20px;
+    accent-color: #c0392b;
+    cursor: pointer;
+  }
+
+  .r-checkbox-label {
+    font-size: .75rem;
+    letter-spacing: .05em;
+    color: #6b6560;
+    font-weight: 400;
+    cursor: pointer;
+    user-select: none;
+  }
 
   .r-error {
     font-size: .74rem; color: #c0392b; font-weight: 400;
@@ -202,11 +254,25 @@ const styles = `
 `;
 
 export default function Login() {
+  const [activeTab, setActiveTab] = useState("login");
+  
+  // Login state
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+
+  // Register state
+  const [regUsername, setRegUsername] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [regPassword, setRegPassword] = useState("");
+  const [regPasswordConfirm, setRegPasswordConfirm] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [regIsLoading, setRegIsLoading] = useState(false);
+  const [regError, setRegError] = useState("");
+  const [regSuccess, setRegSuccess] = useState(false);
+
   const navigate = useNavigate();
 
   const handleLogin = async (e) => {
@@ -224,12 +290,62 @@ export default function Login() {
       const res = await api.post("/auth/login/", { username, password });
       localStorage.setItem("access", res.data.access);
       localStorage.setItem("refresh", res.data.refresh);
+      localStorage.setItem("user", JSON.stringify(res.data.user));
       setSuccess(true);
       setTimeout(() => navigate("/dashboard"), 700);
     } catch (err) {
       setError(err.response?.data?.detail || "Invalid username or password");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setRegIsLoading(true);
+    setRegError("");
+
+    if (!regUsername.trim() || !regEmail.trim() || !regPassword.trim()) {
+      setRegError("Please fill in all fields");
+      setRegIsLoading(false);
+      return;
+    }
+
+    if (regPassword !== regPasswordConfirm) {
+      setRegError("Passwords do not match");
+      setRegIsLoading(false);
+      return;
+    }
+
+    if (regPassword.length < 6) {
+      setRegError("Password must be at least 6 characters long");
+      setRegIsLoading(false);
+      return;
+    }
+
+    try {
+      const res = await api.post("/auth/register/", {
+        username: regUsername,
+        email: regEmail,
+        password: regPassword,
+        password_confirm: regPasswordConfirm,
+        is_admin: isAdmin,
+      });
+      localStorage.setItem("access", res.data.access);
+      localStorage.setItem("refresh", res.data.refresh);
+      localStorage.setItem("user", JSON.stringify(res.data.user));
+      setRegSuccess(true);
+      setTimeout(() => navigate("/dashboard"), 700);
+    } catch (err) {
+      const errorData = err.response?.data || {};
+      if (typeof errorData === 'object') {
+        const firstError = Object.values(errorData)[0];
+        setRegError(Array.isArray(firstError) ? firstError[0] : firstError || "Registration failed");
+      } else {
+        setRegError("Registration failed");
+      }
+    } finally {
+      setRegIsLoading(false);
     }
   };
 
@@ -274,68 +390,219 @@ export default function Login() {
         {/* RIGHT */}
         <div className="r-right">
           <div className="r-step">
-            <span className="r-step-label">Authentication</span>
+            <span className="r-step-label">
+              {activeTab === "login" ? "Authentication" : "Create Account"}
+            </span>
             <div className="r-step-line" />
           </div>
 
-          <p className="r-title">
-            Sign in to<br />your <span>workspace.</span>
-          </p>
-
-          {error && <div className="r-error">{error}</div>}
-          {success && <div className="r-success">Authenticated — redirecting…</div>}
-
-          <form onSubmit={handleLogin}>
-            <div className="r-field">
-              <label className="r-label">Username</label>
-              <input
-                className="r-input"
-                type="text"
-                placeholder="enter username"
-                value={username}
-                onChange={(e) => { setUsername(e.target.value); setError(""); }}
-                disabled={isLoading || success}
-                autoComplete="username"
-                required
-              />
-            </div>
-
-            <div className="r-field">
-              <label className="r-label">Password</label>
-              <input
-                className="r-input"
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => { setPassword(e.target.value); setError(""); }}
-                disabled={isLoading || success}
-                autoComplete="current-password"
-                required
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="r-btn"
-              disabled={isLoading || success}
+          {/* Tabs */}
+          <div className="r-tabs">
+            <div
+              className={`r-tab ${activeTab === "login" ? "active" : ""}`}
+              onClick={() => {
+                setActiveTab("login");
+                setError("");
+                setSuccess(false);
+              }}
             >
-              {isLoading ? (
-                <><span>Signing in</span><div className="r-spinner" /></>
-              ) : success ? (
-                <><span>Authenticated</span><span>✓</span></>
-              ) : (
-                <><span>Sign In</span><span className="r-btn-arrow">→</span></>
-              )}
-            </button>
-          </form>
-
-          <div className="r-foot">
-            <span>Secured</span>
-            <div className="r-foot-dot" />
-            <span>Encrypted</span>
-            <div className="r-foot-dot" />
-            <span>Private</span>
+              Sign In
+            </div>
+            <div
+              className={`r-tab ${activeTab === "register" ? "active" : ""}`}
+              onClick={() => {
+                setActiveTab("register");
+                setRegError("");
+                setRegSuccess(false);
+              }}
+            >
+              Register
+            </div>
           </div>
+
+          {/* Login Form */}
+          {activeTab === "login" && (
+            <>
+              <p className="r-title">
+                Sign in to<br />your <span>workspace.</span>
+              </p>
+
+              {error && <div className="r-error">{error}</div>}
+              {success && <div className="r-success">Authenticated — redirecting…</div>}
+
+              <form onSubmit={handleLogin}>
+                <div className="r-field">
+                  <label className="r-label">Username</label>
+                  <input
+                    className="r-input"
+                    type="text"
+                    placeholder="enter username"
+                    value={username}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      setError("");
+                    }}
+                    disabled={isLoading || success}
+                    autoComplete="username"
+                    required
+                  />
+                </div>
+
+                <div className="r-field">
+                  <label className="r-label">Password</label>
+                  <input
+                    className="r-input"
+                    type="password"
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setError("");
+                    }}
+                    disabled={isLoading || success}
+                    autoComplete="current-password"
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="r-btn"
+                  disabled={isLoading || success}
+                >
+                  {isLoading ? (
+                    <><span>Signing in</span><div className="r-spinner" /></>
+                  ) : success ? (
+                    <><span>Authenticated</span><span>✓</span></>
+                  ) : (
+                    <><span>Sign In</span><span className="r-btn-arrow">→</span></>
+                  )}
+                </button>
+              </form>
+
+              <div className="r-foot">
+                <span>Secured</span>
+                <div className="r-foot-dot" />
+                <span>Encrypted</span>
+                <div className="r-foot-dot" />
+                <span>Private</span>
+              </div>
+            </>
+          )}
+
+          {/* Register Form */}
+          {activeTab === "register" && (
+            <>
+              <p className="r-title">
+                Create your<br /><span>account.</span>
+              </p>
+
+              {regError && <div className="r-error">{regError}</div>}
+              {regSuccess && <div className="r-success">Account created — redirecting…</div>}
+
+              <form onSubmit={handleRegister}>
+                <div className="r-field">
+                  <label className="r-label">Username</label>
+                  <input
+                    className="r-input"
+                    type="text"
+                    placeholder="choose a username"
+                    value={regUsername}
+                    onChange={(e) => {
+                      setRegUsername(e.target.value);
+                      setRegError("");
+                    }}
+                    disabled={regIsLoading || regSuccess}
+                    required
+                  />
+                </div>
+
+                <div className="r-field">
+                  <label className="r-label">Email</label>
+                  <input
+                    className="r-input"
+                    type="email"
+                    placeholder="your@email.com"
+                    value={regEmail}
+                    onChange={(e) => {
+                      setRegEmail(e.target.value);
+                      setRegError("");
+                    }}
+                    disabled={regIsLoading || regSuccess}
+                    required
+                  />
+                </div>
+
+                <div className="r-field">
+                  <label className="r-label">Password</label>
+                  <input
+                    className="r-input"
+                    type="password"
+                    placeholder="••••••••"
+                    value={regPassword}
+                    onChange={(e) => {
+                      setRegPassword(e.target.value);
+                      setRegError("");
+                    }}
+                    disabled={regIsLoading || regSuccess}
+                    required
+                  />
+                </div>
+
+                <div className="r-field">
+                  <label className="r-label">Confirm Password</label>
+                  <input
+                    className="r-input"
+                    type="password"
+                    placeholder="••••••••"
+                    value={regPasswordConfirm}
+                    onChange={(e) => {
+                      setRegPasswordConfirm(e.target.value);
+                      setRegError("");
+                    }}
+                    disabled={regIsLoading || regSuccess}
+                    required
+                  />
+                </div>
+
+                <div className="r-checkbox-group">
+                  <input
+                    type="checkbox"
+                    id="isAdmin"
+                    className="r-checkbox"
+                    checked={isAdmin}
+                    onChange={(e) => setIsAdmin(e.target.checked)}
+                    disabled={regIsLoading || regSuccess}
+                  />
+                  <label htmlFor="isAdmin" className="r-checkbox-label">
+                    Register as Admin (full access to edit & delete records)
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  className="r-btn"
+                  disabled={regIsLoading || regSuccess}
+                >
+                  {regIsLoading ? (
+                    <><span>Creating account</span><div className="r-spinner" /></>
+                  ) : regSuccess ? (
+                    <><span>Account Created</span><span>✓</span></>
+                  ) : (
+                    <><span>Register</span><span className="r-btn-arrow">→</span></>
+                  )}
+                </button>
+              </form>
+
+              <div className="r-foot">
+                <span>Secured</span>
+                <div className="r-foot-dot" />
+                <span>Encrypted</span>
+                <div className="r-foot-dot" />
+                <span>Private</span>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </>

@@ -1,14 +1,32 @@
 
 from django.db import models
+from django.contrib.auth.models import User
+
+
+class UserProfile(models.Model):
+    """Extended user profile to track admin/employee roles"""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    is_admin = models.BooleanField(default=False)
+    
+    def __str__(self):
+        role = "Admin" if self.is_admin else "Employee"
+        return f"{self.user.username} - {role}"
 
 
 class Category(models.Model):
     name = models.CharField(max_length=100, unique=True)
 
 class ItemType(models.Model):
-    category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name="types")
+    CATEGORY_CHOICES = [
+        ("cylinder", "Cylinder"),
+        ("accessory", "Accessory"),
+    ]
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES)
     name = models.CharField(max_length=100)
     quantity = models.PositiveIntegerField(default=0)  # For tracking accessory quantities
+    
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="itemtypes_created")
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = ('category', 'name')
@@ -34,6 +52,7 @@ class Supplier(models.Model):
 
     date_received = models.DateField()
 
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="suppliers_created")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -60,6 +79,7 @@ class Customer(models.Model):
     deposit_date = models.DateField()
     returned_date = models.DateField(blank=True, null=True)
 
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="customers_created")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -114,6 +134,7 @@ class DailySale(models.Model):
 
     sale_date = models.DateField(auto_now_add=True)
 
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="daily_sales_created")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -166,6 +187,13 @@ class CylinderTransaction(models.Model):
     notes = models.TextField(blank=True, null=True)
     
     transaction_date = models.DateField()
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cylinder_transactions_created",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     
     def __str__(self):

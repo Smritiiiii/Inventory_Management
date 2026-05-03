@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { isCurrentUserAdmin } from "../utils/auth";
+import { formatAuditTimestamp } from "../utils/audit";
 
 const initialTransactionState = {
   category: "",
@@ -377,9 +379,42 @@ const styles = `
   .ct-table tbody td {
     padding: 0.85rem 1rem;
   }
-  .cr-action-btn:hover { opacity: .8; transform: scale(1.1); }
-  .cr-btn-edit { background: #fff3cd; color: #856404; }
-  .cr-btn-delete { background: #fdecea; color: #c0392b; }
+  .ct-action-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .ct-action-btn:hover { opacity: .8; transform: scale(1.1); }
+  .ct-action-btn:disabled,
+  .ct-action-btn:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    transform: none;
+  }
+  .ct-btn-edit { background: #fff3cd; color: #856404; }
+  .ct-btn-delete { background: #fdecea; color: #c0392b; }
+
+  .ct-audit {
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+  .ct-audit-user {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  .ct-audit-time {
+    font-size: .75rem;
+    color: #777;
+  }
 
   .ct-badge {
     display: inline-block;
@@ -449,14 +484,13 @@ const CylinderTracking = () => {
   const [activeTab, setActiveTab] = useState("transactions");
   const inventory = [];
   const [allTransactions, setAllTransactions] = useState([]);
-  const [filteredTransactions, setFilteredTransactions] = useState([]);
   const [categories, setCategories] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [formData, setFormData] = useState(initialTransactionState);
-  const [itemTypes, setItemTypes] = useState([]);
+  const [allItemTypes, setAllItemTypes] = useState([]);
   const [editingId, setEditingId] = useState(null);
-  const [showForm, setShowForm] = useState(false);
+  const isAdmin = isCurrentUserAdmin();
 
   // Filter states
   const [searchQuery, setSearchQuery] = useState("");
@@ -467,7 +501,6 @@ const CylinderTracking = () => {
     try {
       const transactions = await fetchAllPages("/api/cylinder-transactions/");
       setAllTransactions(transactions);
-      setFilteredTransactions(transactions);
     } catch (err) {
       console.error("Transactions fetch error", err);
     }
@@ -475,7 +508,9 @@ const CylinderTracking = () => {
 
   // Fetch all data
   useEffect(() => {
-    loadTransactions();
+    fetchAllPages("/api/cylinder-transactions/")
+      .then(setAllTransactions)
+      .catch((err) => console.error("Transactions fetch error", err));
 
     fetchAllPages("/api/categories/")
       .then((cats) =>
@@ -484,6 +519,10 @@ const CylinderTracking = () => {
         )
       )
       .catch((err) => console.error("Categories fetch error", err));
+
+    fetchAllPages("/api/item-types/")
+      .then(setAllItemTypes)
+      .catch((err) => console.error("Item types fetch error", err));
 
     fetchAllPages("/api/customers/")
       .then(setCustomers)
@@ -494,47 +533,32 @@ const CylinderTracking = () => {
       .catch((err) => console.error("Suppliers fetch error", err));
   }, []);
 
-  // Fetch item types when category changes
-  useEffect(() => {
-    if (formData.category) {
-      fetchAllPages("/api/item-types/")
-        .then((types) => {
-          const filtered = types.filter(
-            (itemType) => String(itemType.category) === String(formData.category)
-          );
-          setItemTypes(filtered);
-        })
-        .catch((err) => console.error("Item types fetch error", err));
-    } else {
-      setItemTypes([]);
-    }
-  }, [formData.category]);
+  const itemTypes = formData.category
+    ? allItemTypes.filter(
+        (itemType) => String(itemType.category) === String(formData.category)
+      )
+    : [];
 
-  // Apply filters to transactions
-  useEffect(() => {
-    let filtered = allTransactions;
+  const filteredTransactions = allTransactions.filter((transactionRecord) => {
+    const matchesSearch = searchQuery
+      ? transactionRecord.category_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        transactionRecord.item_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        transactionRecord.cylinder_size.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (transactionRecord.customer_name &&
+          transactionRecord.customer_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (transactionRecord.supplier_name &&
+          transactionRecord.supplier_name.toLowerCase().includes(searchQuery.toLowerCase()))
+      : true;
 
-    // Search filter
-    if (searchQuery) {
-      filtered = filtered.filter(t =>
-        t.category_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.item_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.cylinder_size.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (t.customer_name && t.customer_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (t.supplier_name && t.supplier_name.toLowerCase().includes(searchQuery.toLowerCase()))
-      );
-    }
+    const matchesStartDate = filterStartDate
+      ? new Date(transactionRecord.transaction_date) >= new Date(filterStartDate)
+      : true;
+    const matchesEndDate = filterEndDate
+      ? new Date(transactionRecord.transaction_date) <= new Date(filterEndDate)
+      : true;
 
-    // Date range filter
-    if (filterStartDate) {
-      filtered = filtered.filter(t => new Date(t.transaction_date) >= new Date(filterStartDate));
-    }
-    if (filterEndDate) {
-      filtered = filtered.filter(t => new Date(t.transaction_date) <= new Date(filterEndDate));
-    }
-
-    setFilteredTransactions(filtered);
-  }, [searchQuery, filterStartDate, filterEndDate, allTransactions]);
+    return matchesSearch && matchesStartDate && matchesEndDate;
+  });
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -543,6 +567,10 @@ const CylinderTracking = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (editingId && !isAdmin) {
+      alert("Only admins can edit cylinder transactions.");
+      return;
+    }
     const token = localStorage.getItem("access");
 
     const payload = {
@@ -589,7 +617,6 @@ const CylinderTracking = () => {
       alert(editingId ? "Transaction updated successfully" : "Transaction logged successfully");
       setFormData(initialTransactionState);
       setEditingId(null);
-      setShowForm(false);
 
       await loadTransactions();
     } catch (err) {
@@ -642,6 +669,10 @@ const CylinderTracking = () => {
 
 
   const handleEdit = (tracking) => {
+    if (!isAdmin) {
+      alert("Only admins can edit cylinder transactions.");
+      return;
+    }
     setEditingId(tracking.id);
     setFormData({
       category: tracking.category,
@@ -655,7 +686,6 @@ const CylinderTracking = () => {
       notes: tracking.notes,
     });
     setActiveTab("transactions");
-    setShowForm(true);
     // Scroll to form
     setTimeout(() => {
       document.querySelector(".ct-form-card")?.scrollIntoView({ behavior: "smooth" });
@@ -663,6 +693,10 @@ const CylinderTracking = () => {
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert("Only admins can delete cylinder transactions.");
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this record?"))
       return;
     try {
@@ -930,7 +964,6 @@ const CylinderTracking = () => {
                     onClick={() => {
                       setFormData(initialTransactionState);
                       setEditingId(null);
-                      setShowForm(false);
                     }}
                   >
                     {editingId ? "Cancel" : "Clear"}
@@ -1002,13 +1035,14 @@ const CylinderTracking = () => {
                     <th>Customer/Supplier</th>
                     <th>Date</th>
                     <th>Notes</th>
+                    <th>Audit Trail</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredTransactions.length === 0 ? (
                     <tr>
-                      <td colSpan="8">
+                      <td colSpan="10">
                         <div className="ct-empty">
                           <div className="ct-empty-icon">📋</div>
                           {searchQuery || filterStartDate || filterEndDate
@@ -1045,17 +1079,29 @@ const CylinderTracking = () => {
                           {trans.notes || "—"}
                         </td>
                         <td>
+                          <div className="ct-audit">
+                            <span className="ct-audit-user">
+                              {trans.created_by_name || "Not recorded"}
+                            </span>
+                            <span className="ct-audit-time">
+                              {formatAuditTimestamp(trans.created_at)}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
                           <button
-                            className="cr-action-btn cr-btn-edit"
+                            className="ct-action-btn ct-btn-edit"
                             onClick={() => handleEdit(trans)}
-                            title="Edit"
+                            title={isAdmin ? "Edit" : "Admin only"}
+                            disabled={!isAdmin}
                           >
                             <i className="bi bi-pencil-fill"></i> E
                           </button>{" "}
                           <button
-                            className="cr-action-btn cr-btn-delete"
+                            className="ct-action-btn ct-btn-delete"
                             onClick={() => handleDelete(trans.id)}
-                            title="Delete"
+                            title={isAdmin ? "Delete" : "Admin only"}
+                            disabled={!isAdmin}
                           >
                             <i className="bi bi-trash-fill"></i> D
                           </button>

@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { isCurrentUserAdmin } from "../utils/auth";
+import { formatAuditTimestamp } from "../utils/audit";
 
 const initialFormState = {
   sale_type: "cylinder",
@@ -247,8 +249,29 @@ const styles = `
     transition: opacity .15s, transform .15s;
   }
   .ds-action-btn:hover { opacity: .8; transform: scale(1.1); }
+  .ds-action-btn:disabled,
+  .ds-action-btn:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    transform: none;
+  }
   .ds-btn-edit   { background: #fff3cd; color: #856404; }
   .ds-btn-delete { background: #fdecea; color: #c0392b; }
+
+  .ds-audit {
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+  .ds-audit-user {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  .ds-audit-time {
+    font-size: .75rem;
+    color: #777;
+  }
 
   /* ── sale type toggle ── */
   .ds-type-toggle {
@@ -511,22 +534,13 @@ const DailySales = () => {
   const [selectedMonth, setSelectedMonth] = useState(toYearMonth(new Date()));
   const [searchQuery, setSearchQuery] = useState("");
 
-  const [filteredSales, setFilteredSales] = useState([]);
+  const isAdmin = isCurrentUserAdmin();
   
-
-  useEffect(() => { fetchCustomers(); }, []);
-  useEffect(() => { fetchSales(); }, []);
   useEffect(() => {
     fetchAllPages("/api/item-types/")
       .then(setAllItemTypes)
       .catch((err) => console.error("Item types fetch error", err));
   }, []);
-
-  useEffect(() => {
-    applyFilters();
-  }, [sales, timeRange, selectedMonth, searchQuery]);
-
-
 
 useEffect(() => {
   fetchAllPages("/api/categories/")
@@ -534,23 +548,28 @@ useEffect(() => {
     .catch(console.error);
 }, []);
 
-  const fetchCustomers = () => {
+  function fetchCustomers() {
     fetchAllPages("/api/customers/")
       .then(setCustomers)
       .catch((e) => console.error(e));
-  };
+  }
 
-  const fetchSales = () => {
+  function fetchSales() {
     fetchAllPages("/api/daily-sales/")
       .then(setSales)
       .catch((e) => console.error(e));
-  };
+  }
 
-  const applyFilters = () => {
+  useEffect(() => { fetchCustomers(); }, []);
+  useEffect(() => { fetchSales(); }, []);
+
+  const filteredSales = (() => {
     const todayDate = new Date();
     todayDate.setHours(0, 0, 0, 0);
 
     let filtered = [...sales];
+    const getCustomerLabel = (customerId) =>
+      customers.find((customer) => customer.id === customerId)?.full_name || "—";
 
     // ── time filter ──
     if (timeRange === "today") {
@@ -580,7 +599,7 @@ useEffect(() => {
     if (searchQuery.trim()) {
       const q = searchQuery.trim().toLowerCase();
       filtered = filtered.filter((s) => {
-        const name = getCustomerName(s.customer).toLowerCase();
+        const name = getCustomerLabel(s.customer).toLowerCase();
         return name.includes(q);
       });
     }
@@ -591,8 +610,8 @@ useEffect(() => {
       return (da || 0) - (db || 0);
     });
 
-    setFilteredSales(filtered);
-  };
+    return filtered;
+  })();
 
   // Accessory item types only — match by category name "accessory" (case-insensitive)
  // Find the numeric ID of the "accessory" category first
@@ -652,6 +671,10 @@ const selectedAccessory = accessoryItemTypes.find(
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (editingId && !isAdmin) {
+      alert("Only admins can edit sales records.");
+      return;
+    }
     if (formData.sale_type === "cylinder" && !formData.customer) {
       alert("Please select a customer for cylinder sales");
       return;
@@ -703,6 +726,10 @@ const selectedAccessory = accessoryItemTypes.find(
   };
 
   const handleEdit = (sale) => {
+    if (!isAdmin) {
+      alert("Only admins can edit sales records.");
+      return;
+    }
     setEditingId(sale.id);
     setFormData({
       sale_type: sale.sale_type,
@@ -719,6 +746,10 @@ const selectedAccessory = accessoryItemTypes.find(
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert("Only admins can delete sales records.");
+      return;
+    }
     if (!window.confirm("Delete this sale?")) return;
     const token = localStorage.getItem("access");
     try {
@@ -1065,13 +1096,14 @@ const selectedAccessory = accessoryItemTypes.find(
                 <th>Refill #</th>
                 <th>Qty</th>
                 <th>Amount</th>
+                <th>Audit Trail</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredSales.length === 0 ? (
                 <tr>
-                  <td colSpan="10">
+                  <td colSpan="11">
                     <div className="ds-empty">
                       <div className="ds-empty-icon">📊</div>
                       No sales recorded for this period
@@ -1105,17 +1137,29 @@ const selectedAccessory = accessoryItemTypes.find(
                     <td>{sale.quantity}</td>
                     <td><strong>NPR {parseFloat(sale.amount).toLocaleString()}</strong></td>
                     <td>
+                      <div className="ds-audit">
+                        <span className="ds-audit-user">
+                          {sale.created_by_name || "Not recorded"}
+                        </span>
+                        <span className="ds-audit-time">
+                          {formatAuditTimestamp(sale.created_at)}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
                       <button
                         className="ds-action-btn ds-btn-edit"
                         onClick={() => handleEdit(sale)}
-                        title="Edit"
+                        title={isAdmin ? "Edit" : "Admin only"}
+                        disabled={!isAdmin}
                       >
                         <i className="bi bi-pencil-fill"></i> E
                       </button>{" "}
                       <button
                         className="ds-action-btn ds-btn-delete"
                         onClick={() => handleDelete(sale.id)}
-                        title="Delete"
+                        title={isAdmin ? "Delete" : "Admin only"}
+                        disabled={!isAdmin}
                       >
                         <i className="bi bi-trash-fill"></i> D
                       </button>

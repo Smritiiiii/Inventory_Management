@@ -1,12 +1,15 @@
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
 from datetime import timedelta
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
+from .permissions import IsAdminOrCreateOnly, IsAdminCanDeleteOnly
 
 SIZE_ORDER = {"Small": 0, "Medium": 1, "Large": 2}
 
@@ -84,8 +87,8 @@ def _build_inventory_summary():
 
         return rows[key]
 
-    suppliers = Supplier.objects.select_related("category").exclude(
-        category__name__iexact="accessory"
+    suppliers = Supplier.objects.exclude(
+        category__iexact="accessory"
     )
     for supplier in suppliers:
         for size, quantity in _allocate_quantity(
@@ -95,8 +98,7 @@ def _build_inventory_summary():
             get_row(supplier.item_type, size)["supplier_received"] += quantity
 
     customers = list(
-        Customer.objects.select_related("category")
-        .exclude(category__name__iexact="accessory")
+        Customer.objects.exclude(category__iexact="accessory")
     )
     customer_lookup = {customer.id: customer for customer in customers}
 
@@ -125,8 +127,8 @@ def _build_inventory_summary():
         ):
             get_row(sale.item_type, size)["unmatched_sales_quantity"] += quantity
 
-    transactions = CylinderTransaction.objects.select_related("category").exclude(
-        category__name__iexact="accessory"
+    transactions = CylinderTransaction.objects.exclude(
+        category__iexact="accessory"
     )
     for transaction_record in transactions:
         for size, quantity in _allocate_quantity(
@@ -222,38 +224,177 @@ def _build_inventory_summary():
     totals["breakdown"] = breakdown
     return totals
 
+
+# ==================== Authentication Views ====================
+
+class RegisterView(APIView):
+    """
+    User registration endpoint.
+    POST /auth/register/
+    Required fields: username, email, password, password_confirm, is_admin
+    """
+    permission_classes = [permissions.AllowAny]
+    
+    def post(self, request):
+        serializer = UserRegisterSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'is_admin': user.profile.is_admin,
+                },
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'message': 'Registration successful'
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class LoginView(APIView):
+    """
+    User login endpoint.
+    POST /auth/login/
+    Required fields: username, password
+    """
+    permission_classes = [permissions.AllowAny]
+    
+    def post(self, request):
+        from django.contrib.auth import authenticate
+        
+        username = request.data.get('username')
+        password = request.data.get('password')
+        
+        if not username or not password:
+            return Response(
+                {'detail': 'Username and password are required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        user = authenticate(username=username, password=password)
+        if user is None:
+            return Response(
+                {'detail': 'Invalid username or password.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'is_admin': user.profile.is_admin,
+            },
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+        })
+
+
+class CurrentUserView(APIView):
+    """
+    Get current authenticated user profile.
+    GET /auth/current-user/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        user = request.user
+        return Response({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'is_admin': user.profile.is_admin if hasattr(user, 'profile') else False,
+        })
+
+
+# ==================== Category & Item ViewSets ====================
+
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all().order_by("id")
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
 class ItemTypeViewSet(viewsets.ModelViewSet):
-    queryset = ItemType.objects.select_related("category").all().order_by("id")
+    queryset = ItemType.objects.select_related("created_by").all().order_by("id")
     serializer_class = ItemTypeSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrCreateOnly]
+    
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy to prevent employees from deleting"""
+        if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
+            return Response(
+                {'detail': 'Employees cannot delete records.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class SupplierViewSet(viewsets.ModelViewSet):
-    queryset = Supplier.objects.select_related("category").order_by("-created_at")
+    queryset = Supplier.objects.select_related("category", "created_by").order_by("-created_at")
     serializer_class = SupplierSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrCreateOnly]
+    
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy to prevent employees from deleting"""
+        if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
+            return Response(
+                {'detail': 'Employees cannot delete records.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class CustomerViewSet(viewsets.ModelViewSet):
-    queryset = Customer.objects.select_related("category").order_by("-created_at")
+    queryset = Customer.objects.select_related("category", "created_by").order_by("-created_at")
     serializer_class = CustomerSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrCreateOnly]
+    
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy to prevent employees from deleting"""
+        if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
+            return Response(
+                {'detail': 'Employees cannot delete records.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class DailySaleViewSet(viewsets.ModelViewSet):
     serializer_class = DailySaleSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrCreateOnly]
     filter_backends = [filters.OrderingFilter]
     ordering_fields = ['sale_date', 'created_at']
     ordering = ['-sale_date', '-created_at']
+    
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy to prevent employees from deleting"""
+        if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
+            return Response(
+                {'detail': 'Employees cannot delete records.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().destroy(request, *args, **kwargs)
 
     def get_queryset(self):
-        queryset = DailySale.objects.select_related('customer').all()
+        queryset = DailySale.objects.select_related('customer', 'created_by').all()
         
         # Filter by date range if provided
         date_filter = self.request.query_params.get('date_range', None)
@@ -271,7 +412,7 @@ class DailySaleViewSet(viewsets.ModelViewSet):
     def _get_accessory_item(self, item_type_name):
         accessory_item = (
             ItemType.objects.select_for_update()
-            .filter(category__name__iexact="accessory", name=item_type_name)
+            .filter(category__iexact="accessory", name=item_type_name)
             .first()
         )
         if not accessory_item:
@@ -299,14 +440,14 @@ class DailySaleViewSet(viewsets.ModelViewSet):
         accessory_item.quantity += quantity_delta
         accessory_item.save(update_fields=["quantity"])
 
-    def _validate_cylinder_sale(self, sale_type, category_id, item_type, cylinder_size, quantity):
+    def _validate_cylinder_sale(self, sale_type, category, item_type, cylinder_size, quantity):
         """Validate that there are enough cylinders of the specified type and size available for sale"""
         if sale_type != "cylinder":
             return
 
         # Check if cylinder inventory exists with sufficient quantity
         cylinder_inventory = CylinderInventory.objects.select_for_update().filter(
-            category_id=category_id,
+            category=category,
             item_type=item_type,
             cylinder_size=cylinder_size
         ).first()
@@ -326,13 +467,13 @@ class DailySaleViewSet(viewsets.ModelViewSet):
         cylinder_inventory.filled_quantity -= quantity
         cylinder_inventory.save(update_fields=["filled_quantity"])
 
-    def _restore_cylinder_inventory(self, sale_type, category_id, item_type, cylinder_size, quantity):
+    def _restore_cylinder_inventory(self, sale_type, category, item_type, cylinder_size, quantity):
         """Restore cylinder inventory when a sale is cancelled or deleted"""
         if sale_type != "cylinder":
             return
 
         cylinder_inventory = CylinderInventory.objects.select_for_update().filter(
-            category_id=category_id,
+            category=category,
             item_type=item_type,
             cylinder_size=cylinder_size
         ).first()
@@ -349,12 +490,12 @@ class DailySaleViewSet(viewsets.ModelViewSet):
             sale_type = serializer.validated_data.get("sale_type")
             item_type = serializer.validated_data.get("item_type")
             quantity = serializer.validated_data.get("quantity") or 0
-            category_id = serializer.validated_data.get("category")
+            category = serializer.validated_data.get("category")
             cylinder_size = serializer.validated_data.get("cylinder_size")
 
             # Validate cylinder sales
             if sale_type == "cylinder":
-                self._validate_cylinder_sale(sale_type, category_id, item_type, cylinder_size, quantity)
+                self._validate_cylinder_sale(sale_type, category, item_type, cylinder_size, quantity)
             
             # Adjust accessory stock
             self._adjust_accessory_stock(sale_type, item_type, -quantity)
@@ -374,7 +515,7 @@ class DailySaleViewSet(viewsets.ModelViewSet):
             if instance.sale_type == "cylinder":
                 self._restore_cylinder_inventory(
                     instance.sale_type,
-                    instance.category_id,
+                    instance.category,
                     instance.item_type,
                     instance.cylinder_size,
                     instance.quantity or 0,
@@ -389,12 +530,12 @@ class DailySaleViewSet(viewsets.ModelViewSet):
             new_sale_type = serializer.validated_data.get("sale_type", instance.sale_type)
             new_item_type = serializer.validated_data.get("item_type", instance.item_type)
             new_quantity = serializer.validated_data.get("quantity", instance.quantity) or 0
-            new_category_id = serializer.validated_data.get("category", instance.category_id)
+            new_category = serializer.validated_data.get("category", instance.category)
             new_cylinder_size = serializer.validated_data.get("cylinder_size", instance.cylinder_size)
 
             # Validate new cylinder sale if applicable
             if new_sale_type == "cylinder":
-                self._validate_cylinder_sale(new_sale_type, new_category_id, new_item_type, new_cylinder_size, new_quantity)
+                self._validate_cylinder_sale(new_sale_type, new_category, new_item_type, new_cylinder_size, new_quantity)
             
             self._adjust_accessory_stock(new_sale_type, new_item_type, -new_quantity)
             self.perform_update(serializer)
@@ -409,7 +550,7 @@ class DailySaleViewSet(viewsets.ModelViewSet):
             if instance.sale_type == "cylinder":
                 self._restore_cylinder_inventory(
                     instance.sale_type,
-                    instance.category_id,
+                    instance.category,
                     instance.item_type,
                     instance.cylinder_size,
                     instance.quantity or 0,
@@ -436,12 +577,17 @@ class CylinderInventoryViewSet(viewsets.ModelViewSet):
 
 
 class CylinderTransactionViewSet(viewsets.ModelViewSet):
-    queryset = CylinderTransaction.objects.select_related('category', 'supplier', 'customer').all()
+    queryset = CylinderTransaction.objects.select_related(
+        'category', 'supplier', 'customer', 'created_by'
+    ).all()
     serializer_class = CylinderTransactionSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrCreateOnly]
     filter_backends = [filters.OrderingFilter]
     ordering_fields = ['transaction_date', 'created_at']
     ordering = ['-transaction_date', '-created_at']
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
     
     @action(detail=False, methods=['get'])
     def current_inventory_summary(self, request):

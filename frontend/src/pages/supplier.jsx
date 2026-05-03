@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { isCurrentUserAdmin } from "../utils/auth";
+import { formatAuditTimestamp } from "../utils/audit";
 
 /* ── shared design system (mirrors Customer.jsx / DailySales.jsx) ── */
 const styles = `
@@ -180,8 +182,29 @@ const styles = `
     transition: opacity .15s, transform .15s;
   }
   .sp-action-btn:hover { opacity: .8; transform: scale(1.1); }
+  .sp-action-btn:disabled,
+  .sp-action-btn:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    transform: none;
+  }
   .sp-btn-edit   { background: #fff3cd; color: #856404; }
   .sp-btn-delete { background: #fdecea; color: #c0392b; }
+
+  .sp-audit {
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+  .sp-audit-user {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  .sp-audit-time {
+    font-size: .75rem;
+    color: #777;
+  }
 
   /* ── form card ── */
   .sp-form-wrap {
@@ -358,6 +381,7 @@ const Supplier = () => {
   const [editingId, setEditingId] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
+  const isAdmin = isCurrentUserAdmin();
 
   const [formData, setFormData] = useState({
     supplier_name: "",
@@ -365,7 +389,7 @@ const Supplier = () => {
     item_type: "",
     cylinder_size: "",
     quantity_received: "",
-    date_received: "",
+    date_received: new Date().toISOString().split("T")[0],
     total_amount: "",
     amount_paid: "",
   });
@@ -385,13 +409,13 @@ const Supplier = () => {
       .catch(console.error);
   }, []);
 
-  useEffect(() => { fetchSuppliers(); }, []);
-
-  const fetchSuppliers = () => {
+  function fetchSuppliers() {
     fetchAllPages("/api/suppliers/")
       .then(setSuppliers)
       .catch(console.error);
-  };
+  }
+
+  useEffect(() => { fetchSuppliers(); }, []);
 
   const CYLINDER_SIZES = ["Small", "Medium", "Large"];
 
@@ -421,6 +445,10 @@ const handleCylinderSizeChange = (size) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (editingId && !isAdmin) {
+      alert("Only admins can edit supplier records.");
+      return;
+    }
     const payload = {
       supplier_name: formData.supplier_name,
       category: Number(formData.category),
@@ -454,6 +482,10 @@ const handleCylinderSizeChange = (size) => {
   };
 
   const handleEdit = (s) => {
+    if (!isAdmin) {
+      alert("Only admins can edit supplier records.");
+      return;
+    }
     setEditingId(s.id);
     setFormData({
       supplier_name: s.supplier_name,
@@ -469,6 +501,10 @@ const handleCylinderSizeChange = (size) => {
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert("Only admins can delete supplier records.");
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this record?")) return;
     try {
       const token = localStorage.getItem("access");
@@ -496,15 +532,10 @@ const handleCylinderSizeChange = (size) => {
 
   // Pagination logic
   const totalPages = Math.ceil(suppliers.length / itemsPerPage);
-  const startIdx = (currentPage - 1) * itemsPerPage;
+  const activePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
+  const startIdx = (activePage - 1) * itemsPerPage;
   const endIdx = startIdx + itemsPerPage;
   const paginatedSuppliers = suppliers.slice(startIdx, endIdx);
-
-  useEffect(() => {
-    if (currentPage > totalPages && totalPages > 0) {
-      setCurrentPage(totalPages);
-    }
-  }, [currentPage, totalPages]);
 
   // summary stats
   const totalReceived = suppliers.reduce((s, r) => s + Number(r.quantity_received || 0), 0);
@@ -741,13 +772,14 @@ const handleCylinderSizeChange = (size) => {
                 <th>Total Amount</th>
                 <th>Amount Paid</th>
                 <th>Balance</th>
+                <th>Audit Trail</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {paginatedSuppliers.length === 0 ? (
                 <tr>
-                  <td colSpan="10">
+                  <td colSpan="11">
                     <div className="sp-empty">
                       <div className="sp-empty-icon">🚚</div>
                       No supplier records found
@@ -781,15 +813,29 @@ const handleCylinderSizeChange = (size) => {
                         </span>
                       </td>
                       <td>
+                        <div className="sp-audit">
+                          <span className="sp-audit-user">
+                            {s.created_by_name || "Not recorded"}
+                          </span>
+                          <span className="sp-audit-time">
+                            {formatAuditTimestamp(s.created_at)}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
                         <button
                           className="sp-action-btn sp-btn-edit"
-                          onClick={() => handleEdit(s)} title="Edit"
+                          onClick={() => handleEdit(s)}
+                          title={isAdmin ? "Edit" : "Admin only"}
+                          disabled={!isAdmin}
                         >
                           <i className="bi bi-pencil-fill"></i> E
                         </button>{" "}
                         <button
                           className="sp-action-btn sp-btn-delete"
-                          onClick={() => handleDelete(s.id)} title="Delete"
+                          onClick={() => handleDelete(s.id)}
+                          title={isAdmin ? "Delete" : "Admin only"}
+                          disabled={!isAdmin}
                         >
                           <i className="bi bi-trash-fill"></i> D
                         </button>
@@ -804,51 +850,51 @@ const handleCylinderSizeChange = (size) => {
           {/* ── pagination ── */}
           {suppliers.length > 0 && (
             <div className="sp-pagination">
-              <button
-                className="sp-pagination-btn"
-                disabled={currentPage === 1}
-                onClick={() => setCurrentPage(1)}
-              >
-                « First
-              </button>
-              <button
-                className="sp-pagination-btn"
-                disabled={currentPage === 1}
-                onClick={() => setCurrentPage(currentPage - 1)}
-              >
-                ‹ Prev
-              </button>
-
-              {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
                 <button
-                  key={page}
-                  className={`sp-pagination-btn${currentPage === page ? " active" : ""}`}
-                  onClick={() => setCurrentPage(page)}
+                  className="sp-pagination-btn"
+                  disabled={activePage === 1}
+                  onClick={() => setCurrentPage(1)}
                 >
-                  {page}
+                  « First
+                </button>
+                <button
+                  className="sp-pagination-btn"
+                  disabled={activePage === 1}
+                  onClick={() => setCurrentPage(activePage - 1)}
+                >
+                  ‹ Prev
+                </button>
+
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+                  <button
+                    key={page}
+                    className={`sp-pagination-btn${activePage === page ? " active" : ""}`}
+                    onClick={() => setCurrentPage(page)}
+                  >
+                    {page}
                 </button>
               ))}
 
-              <button
-                className="sp-pagination-btn"
-                disabled={currentPage === totalPages}
-                onClick={() => setCurrentPage(currentPage + 1)}
-              >
-                Next ›
-              </button>
-              <button
-                className="sp-pagination-btn"
-                disabled={currentPage === totalPages}
-                onClick={() => setCurrentPage(totalPages)}
-              >
-                Last »
-              </button>
+                <button
+                  className="sp-pagination-btn"
+                  disabled={activePage === totalPages}
+                  onClick={() => setCurrentPage(activePage + 1)}
+                >
+                  Next ›
+                </button>
+                <button
+                  className="sp-pagination-btn"
+                  disabled={activePage === totalPages}
+                  onClick={() => setCurrentPage(totalPages)}
+                >
+                  Last »
+                </button>
 
-              <span className="sp-pagination-info">
-                Page {currentPage} of {totalPages} ({suppliers.length} total)
-              </span>
-            </div>
-          )}
+                <span className="sp-pagination-info">
+                  Page {activePage} of {totalPages} ({suppliers.length} total)
+                </span>
+              </div>
+            )}
         </div>
 
       </div>

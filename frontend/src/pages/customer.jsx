@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { isCurrentUserAdmin } from "../utils/auth";
+import { formatAuditTimestamp } from "../utils/audit";
 
 const initialFormState = {
   full_name: "",
@@ -10,7 +12,7 @@ const initialFormState = {
   cylinder_size: "",
   quantity: "",
   deposit_amount: "",
-  deposit_date: "",
+  deposit_date: new Date().toISOString().split("T")[0],
   returned_date: "",
 };
 
@@ -128,8 +130,29 @@ const styles = `
     transition: opacity .15s, transform .15s;
   }
   .cr-action-btn:hover { opacity: .8; transform: scale(1.1); }
+  .cr-action-btn:disabled,
+  .cr-action-btn:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    transform: none;
+  }
   .cr-btn-edit { background: #fff3cd; color: #856404; }
   .cr-btn-delete { background: #fdecea; color: #c0392b; }
+
+  .cr-audit {
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+  }
+  .cr-audit-user {
+    font-weight: 600;
+    color: #1a1a1a;
+  }
+  .cr-audit-time {
+    font-size: .75rem;
+    color: #777;
+  }
 
   /* ── form card ── */
   .cr-form-wrap {
@@ -389,6 +412,7 @@ const Customer = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
+  const isAdmin = isCurrentUserAdmin();
 
   // Fetch categories
   useEffect(() => {
@@ -404,14 +428,14 @@ const Customer = () => {
       .catch((err) => console.error("Item types fetch error", err));
   }, []);
 
-  // Fetch customers
-  useEffect(() => { fetchCustomers(); }, []);
-
-  const fetchCustomers = () => {
+  function fetchCustomers() {
     fetchAllPages("/api/customers/")
       .then(setCustomers)
       .catch((err) => console.error(err));
-  };
+  }
+
+  // Fetch customers
+  useEffect(() => { fetchCustomers(); }, []);
 
   const filteredCustomers = customers.filter((c) =>
   c.full_name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -419,15 +443,10 @@ const Customer = () => {
 
   // Pagination logic
   const totalPages = Math.ceil(filteredCustomers.length / itemsPerPage);
-  const startIdx = (currentPage - 1) * itemsPerPage;
+  const activePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
+  const startIdx = (activePage - 1) * itemsPerPage;
   const endIdx = startIdx + itemsPerPage;
   const paginatedCustomers = filteredCustomers.slice(startIdx, endIdx);
-
-  useEffect(() => {
-    if (currentPage > totalPages && totalPages > 0) {
-      setCurrentPage(totalPages);
-    }
-  }, [currentPage, totalPages]);
   // Filter item types by selected category
   const filteredItemTypes = formData.category
     ? allItemTypes.filter(
@@ -452,6 +471,10 @@ const Customer = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (editingId && !isAdmin) {
+      alert("Only admins can edit customer records.");
+      return;
+    }
     const token = localStorage.getItem("access");
     const payload = {
       ...formData,
@@ -490,6 +513,10 @@ const Customer = () => {
   };
 
   const handleEdit = (customer) => {
+    if (!isAdmin) {
+      alert("Only admins can edit customer records.");
+      return;
+    }
     setEditingId(customer.id);
     setFormData({
       full_name: customer.full_name,
@@ -507,6 +534,10 @@ const Customer = () => {
   };
 
   const handleDelete = async (id) => {
+    if (!isAdmin) {
+      alert("Only admins can delete customer records.");
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this customer?"))
       return;
     try {
@@ -576,13 +607,14 @@ const Customer = () => {
                     <th>Deposit</th>
                     <th>Deposit Date</th>
                     <th>Return Date</th>
+                    <th>Audit Trail</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                  {paginatedCustomers.length === 0 ? (
   <tr>
-    <td colSpan="11">
+    <td colSpan="12">
       <div className="cr-empty">
         <div className="cr-empty-icon">📋</div>
         {searchQuery ? "No customers match your search" : "No customer records found"}
@@ -617,17 +649,29 @@ const Customer = () => {
                           )}
                         </td>
                         <td>
+                          <div className="cr-audit">
+                            <span className="cr-audit-user">
+                              {c.created_by_name || "Not recorded"}
+                            </span>
+                            <span className="cr-audit-time">
+                              {formatAuditTimestamp(c.created_at)}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
                           <button
                             className="cr-action-btn cr-btn-edit"
                             onClick={() => handleEdit(c)}
-                            title="Edit"
+                            title={isAdmin ? "Edit" : "Admin only"}
+                            disabled={!isAdmin}
                           >
                             <i className="bi bi-pencil-fill"></i> E
                           </button>{" "}
                           <button
                             className="cr-action-btn cr-btn-delete"
                             onClick={() => handleDelete(c.id)}
-                            title="Delete"
+                            title={isAdmin ? "Delete" : "Admin only"}
+                            disabled={!isAdmin}
                           >
                             <i className="bi bi-trash-fill"></i> D
                           </button>
@@ -643,15 +687,15 @@ const Customer = () => {
                 <div className="cr-pagination">
                   <button
                     className="cr-pagination-btn"
-                    disabled={currentPage === 1}
+                    disabled={activePage === 1}
                     onClick={() => setCurrentPage(1)}
                   >
                     « First
                   </button>
                   <button
                     className="cr-pagination-btn"
-                    disabled={currentPage === 1}
-                    onClick={() => setCurrentPage(currentPage - 1)}
+                    disabled={activePage === 1}
+                    onClick={() => setCurrentPage(activePage - 1)}
                   >
                     ‹ Prev
                   </button>
@@ -659,7 +703,7 @@ const Customer = () => {
                   {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
                     <button
                       key={page}
-                      className={`cr-pagination-btn${currentPage === page ? " active" : ""}`}
+                      className={`cr-pagination-btn${activePage === page ? " active" : ""}`}
                       onClick={() => setCurrentPage(page)}
                     >
                       {page}
@@ -668,21 +712,21 @@ const Customer = () => {
 
                   <button
                     className="cr-pagination-btn"
-                    disabled={currentPage === totalPages}
-                    onClick={() => setCurrentPage(currentPage + 1)}
+                    disabled={activePage === totalPages}
+                    onClick={() => setCurrentPage(activePage + 1)}
                   >
                     Next ›
                   </button>
                   <button
                     className="cr-pagination-btn"
-                    disabled={currentPage === totalPages}
+                    disabled={activePage === totalPages}
                     onClick={() => setCurrentPage(totalPages)}
                   >
                     Last »
                   </button>
 
                   <span className="cr-pagination-info">
-                    Page {currentPage} of {totalPages} ({filteredCustomers.length} total)
+                    Page {activePage} of {totalPages} ({filteredCustomers.length} total)
                   </span>
                 </div>
               )}

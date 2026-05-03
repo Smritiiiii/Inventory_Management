@@ -1,6 +1,18 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
-from .models import CylinderTransaction, CylinderInventory
+from .models import CylinderTransaction, CylinderInventory, UserProfile
+from django.contrib.auth.models import User
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    """Create a UserProfile whenever a new User is created"""
+    if created:
+        UserProfile.objects.create(user=instance, is_admin=False)
+
+@receiver(post_save, sender=User)
+def save_user_profile(sender, instance, **kwargs):
+    """Save the UserProfile whenever the User is saved"""
+    instance.profile.save()
 
 @receiver(post_save, sender=CylinderTransaction)
 def update_inventory_on_transaction(sender, instance, created, **kwargs):

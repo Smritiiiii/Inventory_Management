@@ -4,12 +4,20 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
-from datetime import timedelta
+from django.http import HttpResponse
+from datetime import timedelta, datetime
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
 from .permissions import IsAdminOrCreateOnly, IsAdminCanDeleteOnly
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
 SIZE_ORDER = {"Small": 0, "Medium": 1, "Large": 2}
 
@@ -316,7 +324,7 @@ class CurrentUserView(APIView):
 # ==================== Category & Item ViewSets ====================
 
 class CategoryViewSet(viewsets.ModelViewSet):
-    queryset = Category.objects.all().order_by("id")
+    queryset = Category.objects.all().order_by("name")
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 

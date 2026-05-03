@@ -4,9 +4,7 @@ import { fetchAllPages } from "../utils/paginated";
 import { isCurrentUserAdmin } from "../utils/auth";
 import { formatAuditTimestamp } from "../utils/audit";
 
-const STATIC_CATEGORY_NAMES = ["cylinder", "accessory"];
 
-/* ── shared design system (mirrors Supplier.jsx) ── */
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap');
 
@@ -338,7 +336,6 @@ const styles = `
 
 export default function Category() {
   const [formData, setFormData] = useState({ category: "", name: "", quantity: "" });
-  const [categories, setCategories] = useState([]);
   const [itemTypes, setItemTypes] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -346,14 +343,6 @@ export default function Category() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
   const isAdmin = isCurrentUserAdmin();
-
-  const loadCategories = async () => {
-    try {
-      setCategories(await fetchAllPages("/api/categories/"));
-    } catch (error) {
-      console.error("Error loading categories:", error);
-    }
-  };
 
   const loadItemTypes = async () => {
     setLoading(true);
@@ -377,14 +366,11 @@ export default function Category() {
       alert("Please fill in both fields");
       return;
     }
-    const selectedCategory = categories.find(
-      (category) => String(category.id) === String(formData.category)
-    );
     const isAccessoryCategory =
-      selectedCategory?.name?.trim().toLowerCase() === "accessory";
+      formData.category === "accessory";
     try {
       const payload = {
-        category: Number(formData.category),
+        category: formData.category,
         name: formData.name,
         quantity: isAccessoryCategory ? Number(formData.quantity || 0) : 0,
       };
@@ -451,26 +437,12 @@ export default function Category() {
   };
 
   useEffect(() => {
-    loadCategories();
     loadItemTypes();
   }, []);
 
-  const getCategoryName = (categoryId) => {
-    const cat = categories.find((c) => c.id === categoryId);
-    return cat ? cat.name : categoryId;
-  };
-
-  const selectedCategory = categories.find(
-    (category) => String(category.id) === String(formData.category)
-  );
-  const staticCategoryOptions = STATIC_CATEGORY_NAMES.map((categoryName) =>
-    categories.find(
-      (category) => category.name?.trim().toLowerCase() === categoryName
-    )
-  ).filter(Boolean);
-  const categoryOptions = staticCategoryOptions.length > 0 ? staticCategoryOptions : categories;
+ 
   const isAccessoryCategory =
-    selectedCategory?.name?.trim().toLowerCase() === "accessory";
+    formData.category === "accessory";
 
   // Pagination logic
   const totalPages = Math.ceil(itemTypes.length / itemsPerPage);
@@ -483,6 +455,7 @@ export default function Category() {
       setCurrentPage(totalPages);
     }
   }, [currentPage, totalPages]);
+  
 
   return (
     <>
@@ -522,11 +495,8 @@ export default function Category() {
                           required
                         >
                           <option value="">Select Category</option>
-                          {categoryOptions.map((cat) => (
-                            <option key={cat.id} value={cat.id}>
-                              {cat.name}
-                            </option>
-                          ))}
+                          <option value="cylinder">Cylinder</option>
+                          <option value="accessory">Accessory</option>
                         </select>
                       </div>
                     </div>
@@ -625,7 +595,9 @@ export default function Category() {
                     <tr key={itemType.id}>
                       <td>
                         <span className="ct-badge ct-badge-cat">
-                          {getCategoryName(itemType.category)}
+                            {itemType.category?.toLowerCase() === "cylinder"
+    ? "Cylinder"
+    : "Accessory"}
                         </span>
                       </td>
                       <td>

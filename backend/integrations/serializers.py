@@ -49,11 +49,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
     
-class CategorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Category
-        fields = '__all__'
-
 class ItemTypeSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="get_category_display", read_only=True)
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)

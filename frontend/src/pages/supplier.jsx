@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { fetchCategoriesFromItemTypes } from "../utils/categories";
 import { isCurrentUserAdmin } from "../utils/auth";
 import { formatAuditTimestamp } from "../utils/audit";
 
@@ -172,15 +173,63 @@ const styles = `
   .sp-empty-icon { font-size: 2.5rem; margin-bottom: .5rem; }
 
   /* ── action buttons ── */
-  .sp-action-btn {
-    width: 32px; height: 32px;
-    border-radius: 8px; border: none;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center; justify-content: center;
-    font-size: .85rem;
-    transition: opacity .15s, transform .15s;
+.sp-action-btn {
+  width: auto;
+  min-width: 40px;
+  max-width: 140px;
+  height: 40px;
+
+  border-radius: 10px;
+  border: none;
+
+  cursor: pointer;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  font-size: .95rem;
+
+  padding: 0 12px;
+
+  transition: opacity .15s, transform .15s;
+  white-space: nowrap;
+}
+
+.sp-action-cell {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.sp-action-wrap {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .sp-action-cell {
+    white-space: normal;
   }
+}
+
+.sp-details-table {
+  width: auto;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.sp-details-table td,
+.sp-details-table th {
+  padding: 8px;
+}
+
+.sp-details-table th:last-child,
+.sp-details-table td:last-child {
+  width: 110px;
+  white-space: nowrap;
+}
   .sp-action-btn:hover { opacity: .8; transform: scale(1.1); }
   .sp-action-btn:disabled,
   .sp-action-btn:disabled:hover {
@@ -307,6 +356,13 @@ const styles = `
   .sp-balance.due  { background: #fef9e7; color: #b7770d; border: 1.5px solid #fdebd0; }
   .sp-balance.paid { background: #eafaf1; color: #1e8449; border: 1.5px solid #d5f5e3; }
 
+  .sp-helper-text {
+    margin-top: .5rem;
+    font-size: .78rem;
+    color: #777;
+    line-height: 1.4;
+  }
+
   /* ── form footer ── */
   .sp-form-footer {
     display: flex; justify-content: flex-end; gap: .75rem;
@@ -375,6 +431,45 @@ const styles = `
   }
 `;
 
+const getTodayDate = () => new Date().toISOString().split("T")[0];
+
+const createInitialFormData = () => ({
+  supplier_name: "",
+  category: "",
+  item_type: "",
+  cylinder_size: "",
+  quantity_received: "",
+  size_quantities: {},
+  size_amounts: {},
+  date_received: getTodayDate(),
+  total_amount: "",
+  amount_paid: "",
+});
+
+const parseSelectedSizes = (value) =>
+  value ? value.split(",").map((size) => size.trim()).filter(Boolean) : [];
+
+const toSafeNumber = (value) => {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const roundCurrency = (value) => {
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  return Object.is(rounded, -0) ? 0 : rounded;
+};
+
+const getGroupTotalAmount = (entries) =>
+  roundCurrency(entries.reduce((sum, entry) => sum + toSafeNumber(entry.total_amount), 0));
+
+const getGroupAmountPaid = (entries) => {
+  if (entries.length === 0) return 0;
+  // amount_paid is stored on individual entries without duplication — always sum
+  return roundCurrency(
+    entries.reduce((sum, entry) => sum + toSafeNumber(entry.amount_paid), 0)
+  );
+};
+
 const Supplier = () => {
   const [suppliers, setSuppliers] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -383,22 +478,13 @@ const Supplier = () => {
   const itemsPerPage = 10;
   const isAdmin = isCurrentUserAdmin();
 
-  const [formData, setFormData] = useState({
-    supplier_name: "",
-    category: "",
-    item_type: "",
-    cylinder_size: "",
-    quantity_received: "",
-    date_received: new Date().toISOString().split("T")[0],
-    total_amount: "",
-    amount_paid: "",
-  });
+  const [formData, setFormData] = useState(createInitialFormData());
 
   const [categoriesData, setCategoriesData] = useState([]);
   const [allItemTypes, setAllItemTypes] = useState([]);
 
   useEffect(() => {
-    fetchAllPages("/api/categories/")
+    fetchCategoriesFromItemTypes()
       .then(setCategoriesData)
       .catch(console.error);
   }, []);
@@ -418,18 +504,55 @@ const Supplier = () => {
   useEffect(() => { fetchSuppliers(); }, []);
 
   const CYLINDER_SIZES = ["Small", "Medium", "Large"];
+  const supplierGroupKey = (supplier) =>
+    `${supplier.supplier_name}||${supplier.category}||${supplier.item_type}`;
 
 const handleCylinderSizeChange = (size) => {
-  const current = formData.cylinder_size
-    ? formData.cylinder_size.split(",").map(s => s.trim()).filter(Boolean)
-    : [];
+  const current = parseSelectedSizes(formData.cylinder_size);
   const updated = current.includes(size)
     ? current.filter(s => s !== size)
     : [...current, size];
   // preserve order: Small → Medium → Large
   const ordered = CYLINDER_SIZES.filter(s => updated.includes(s));
-  setFormData(prev => ({ ...prev, cylinder_size: ordered.join(", ") }));
+
+  setFormData((prev) => {
+    const nextQuantities = { ...prev.size_quantities };
+    const nextAmounts = { ...prev.size_amounts };
+    if (!ordered.includes(size)) {
+      delete nextQuantities[size];
+      delete nextAmounts[size];
+    }
+    return {
+      ...prev,
+      cylinder_size: ordered.join(", "),
+      size_quantities: nextQuantities,
+      size_amounts: nextAmounts,
+    };
+  });
 };
+
+const handleSizeQuantityChange = (size, value) => {
+  setFormData((prev) => ({
+    ...prev,
+    size_quantities: {
+      ...prev.size_quantities,
+      [size]: value,
+    },
+  }));
+};
+
+const handleSizeAmountChange = (size, value) => {
+  setFormData((prev) => ({
+    ...prev,
+    size_amounts: {
+      ...prev.size_amounts,
+      [size]: value,
+    },
+  }));
+};
+
+const selectedSizes = parseSelectedSizes(formData.cylinder_size);
+
   const filteredItemTypes = formData.category
     ? allItemTypes.filter((it) => String(it.category) === String(formData.category))
     : [];
@@ -437,9 +560,39 @@ const handleCylinderSizeChange = (size) => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "category") {
-      setFormData((prev) => ({ ...prev, category: value, item_type: "" }));
+      setFormData((prev) => ({
+        ...prev,
+        category: value,
+        item_type: "",
+        cylinder_size: "",
+        size_quantities: {},
+        size_amounts: {},
+      }));
     } else {
-      setFormData((prev) => ({ ...prev, [name]: value }));
+      setFormData((prev) => {
+        const nextState = { ...prev, [name]: value };
+        const singleSelectedSize = parseSelectedSizes(prev.cylinder_size);
+
+        if (singleSelectedSize.length === 1) {
+          const [size] = singleSelectedSize;
+
+          if (name === "quantity_received") {
+            nextState.size_quantities = {
+              ...prev.size_quantities,
+              [size]: value,
+            };
+          }
+
+          if (name === "total_amount") {
+            nextState.size_amounts = {
+              ...prev.size_amounts,
+              [size]: value,
+            };
+          }
+        }
+
+        return nextState;
+      });
     }
   };
 
@@ -449,16 +602,78 @@ const handleCylinderSizeChange = (size) => {
       alert("Only admins can edit supplier records.");
       return;
     }
+
+    const selectedSizes = parseSelectedSizes(formData.cylinder_size);
+
+    if (!editingId && selectedSizes.length === 0) {
+      alert("Please select at least one cylinder size before saving.");
+      return;
+    }
+
+    if (editingId && selectedSizes.length !== 1) {
+      alert("Please edit one cylinder size record at a time.");
+      return;
+    }
+
+    const totalAmountValue = selectedSizes.length > 1
+      ? roundCurrency(
+          selectedSizes.reduce(
+            (sum, size) => sum + toSafeNumber(formData.size_amounts?.[size]),
+            0
+          )
+        )
+      : roundCurrency(toSafeNumber(formData.total_amount));
+
+    const amountPaidValue = formData.amount_paid === "" ? null : roundCurrency(toSafeNumber(formData.amount_paid));
+
     const payload = {
       supplier_name: formData.supplier_name,
-      category: Number(formData.category),
+      category: formData.category,
       item_type: formData.item_type,
-      cylinder_size: formData.cylinder_size,
-      quantity_received: Number(formData.quantity_received),
       date_received: formData.date_received,
-      total_amount: Number(formData.total_amount),
-      amount_paid: Number(formData.amount_paid),
+      total_amount: totalAmountValue,
+      amount_paid: amountPaidValue,
     };
+
+    if (editingId) {
+      payload.cylinder_size = selectedSizes[0] || formData.cylinder_size;
+      payload.quantity_received = Number(formData.quantity_received || 0);
+      payload.total_amount = roundCurrency(toSafeNumber(formData.total_amount));
+    } else {
+      const sizeEntries = [];
+      for (const size of selectedSizes) {
+        const quantity = Number(
+          (formData.size_quantities?.[size] ?? formData.quantity_received) || 0
+        );
+        if (!quantity || quantity <= 0) {
+          alert(`Enter a valid quantity for ${size}`);
+          return;
+        }
+
+        const rawAmount = selectedSizes.length > 1
+          ? formData.size_amounts?.[size]
+          : formData.total_amount;
+
+        if (selectedSizes.length > 1 && (rawAmount === "" || rawAmount === undefined)) {
+          alert(`Enter an amount for ${size}`);
+          return;
+        }
+
+        const totalAmount = roundCurrency(toSafeNumber(rawAmount));
+        if (totalAmount < 0) {
+          alert(`Enter a valid amount for ${size}`);
+          return;
+        }
+
+        sizeEntries.push({
+          cylinder_size: size,
+          quantity,
+          total_amount: totalAmount,
+        });
+      }
+
+      payload.size_quantities = sizeEntries;
+    }
     try {
       const token = localStorage.getItem("access");
       const url = editingId
@@ -475,6 +690,46 @@ const handleCylinderSizeChange = (size) => {
         alert("Failed to save record.");
         return;
       }
+
+      if (editingId) {
+        const originalRecord = suppliers.find((entry) => entry.id === editingId);
+        const editedGroupKey = supplierGroupKey({
+          supplier_name: formData.supplier_name,
+          category: formData.category,
+          item_type: formData.item_type,
+        });
+
+        if (originalRecord && supplierGroupKey(originalRecord) === editedGroupKey) {
+          const siblingEntries = suppliers.filter(
+            (entry) =>
+              entry.id !== editingId &&
+              supplierGroupKey(entry) === supplierGroupKey(originalRecord)
+          );
+
+          if (siblingEntries.length > 0) {
+            const syncResponses = await Promise.all(
+              siblingEntries.map((entry) =>
+                fetch(`http://127.0.0.1:8000/api/suppliers/${entry.id}/`, {
+                  method: "PATCH",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({ amount_paid: 0 }),
+                })
+              )
+            );
+
+            if (syncResponses.some((response) => !response.ok)) {
+              console.error("Supplier amount sync error:", syncResponses);
+              alert("Record updated, but the paid amount could not be synced to the other sizes.");
+              fetchSuppliers();
+              return;
+            }
+          }
+        }
+      }
+
       alert(`Supplier record ${editingId ? "updated" : "saved"} successfully`);
       resetForm();
       fetchSuppliers();
@@ -486,6 +741,11 @@ const handleCylinderSizeChange = (size) => {
       alert("Only admins can edit supplier records.");
       return;
     }
+
+    const relatedEntries = suppliers.filter(
+      (entry) => supplierGroupKey(entry) === supplierGroupKey(s)
+    );
+
     setEditingId(s.id);
     setFormData({
       supplier_name: s.supplier_name,
@@ -493,9 +753,15 @@ const handleCylinderSizeChange = (size) => {
       item_type: s.item_type,
       cylinder_size: s.cylinder_size,
       quantity_received: s.quantity_received,
+      size_quantities: {
+        [s.cylinder_size]: s.quantity_received,
+      },
+      size_amounts: {
+        [s.cylinder_size]: s.total_amount,
+      },
       date_received: s.date_received || "",
       total_amount: s.total_amount,
-      amount_paid: s.amount_paid,
+      amount_paid: getGroupAmountPaid(relatedEntries),
     });
     setShowForm(true);
   };
@@ -517,34 +783,135 @@ const handleCylinderSizeChange = (size) => {
     } catch (err) { console.error("DELETE ERROR", err); }
   };
 
+  const handleDeleteAllSupplier = async (group) => {
+    if (!isAdmin) {
+      alert("Only admins can delete supplier records.");
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to delete all records for ${group.supplier_name}? This will delete all ${group.entries.length} record(s) of this supplier.`)) return;
+    try {
+      const token = localStorage.getItem("access");
+      const deletePromises = group.entries.map((entry) =>
+        fetch(`http://127.0.0.1:8000/api/suppliers/${entry.id}/`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      );
+      const responses = await Promise.all(deletePromises);
+      if (responses.every((res) => res.ok)) {
+        alert(`All records for ${group.supplier_name} deleted successfully`);
+        fetchSuppliers();
+      } else {
+        alert("Failed to delete some records");
+      }
+    } catch (err) { console.error("DELETE ALL ERROR", err); }
+  };
+
+  const handleMarkGroupAllPaid = async (group) => {
+    if (!isAdmin) {
+      alert("Only admins can mark supplier records as paid.");
+      return;
+    }
+    if (!window.confirm(`Mark all records for ${group.supplier_name} as fully paid? This will set each entry's paid amount equal to its total amount.`)) return;
+
+    try {
+      const token = localStorage.getItem("access");
+      const patchPromises = group.entries.map((entry) =>
+        fetch(`http://127.0.0.1:8000/api/suppliers/${entry.id}/`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ amount_paid: entry.total_amount }),
+        })
+      );
+      const responses = await Promise.all(patchPromises);
+      if (responses.every((res) => res.ok)) {
+        alert(`All records for ${group.supplier_name} are now fully paid.`);
+        fetchSuppliers();
+      } else {
+        alert("Failed to mark some records as fully paid.");
+      }
+    } catch (err) {
+      console.error("MARK ALL PAID ERROR", err);
+    }
+  };
+
   const resetForm = () => {
-    setFormData({
-      supplier_name: "", category: "", item_type: "",
-      cylinder_size: "", quantity_received: "", date_received: "",
-      total_amount: "", amount_paid: "",
-    });
+    setFormData(createInitialFormData());
     setEditingId(null);
     setShowForm(false);
   };
 
   const getCategoryName = (id) =>
-    categoriesData.find((c) => c.id === Number(id))?.name || id;
+    categoriesData.find((c) => String(c.id) === String(id))?.name || id;
 
   // Pagination logic
-  const totalPages = Math.ceil(suppliers.length / itemsPerPage);
+  // Group suppliers with same supplier_name/category/item_type
+  const groupedSuppliers = (() => {
+    const map = new Map();
+    for (const s of suppliers) {
+      const k = supplierGroupKey(s);
+      if (!map.has(k)) {
+        map.set(k, {
+          key: k,
+          supplier_name: s.supplier_name,
+          category: s.category,
+          item_type: s.item_type,
+          created_by_name: s.created_by_name,
+          created_at: s.created_at,
+          entries: [],
+        });
+      }
+      map.get(k).entries.push({
+        id: s.id,
+        cylinder_size: s.cylinder_size,
+        quantity_received: s.quantity_received,
+        date_received: s.date_received,
+        total_amount: s.total_amount,
+        amount_paid: s.amount_paid,
+      });
+    }
+    return Array.from(map.values());
+  })();
+
+  // Pagination logic on grouped suppliers
+  const totalPages = Math.ceil(groupedSuppliers.length / itemsPerPage);
   const activePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
   const startIdx = (activePage - 1) * itemsPerPage;
   const endIdx = startIdx + itemsPerPage;
-  const paginatedSuppliers = suppliers.slice(startIdx, endIdx);
+  const paginatedSuppliers = groupedSuppliers.slice(startIdx, endIdx);
+
+  const [expandedGroups, setExpandedGroups] = useState({});
+  const toggleGroup = (key) => setExpandedGroups((p) => ({ ...p, [key]: !p[key] }));
 
   // summary stats
-  const totalReceived = suppliers.reduce((s, r) => s + Number(r.quantity_received || 0), 0);
-  const totalPaid     = suppliers.reduce((s, r) => s + Number(r.amount_paid || 0), 0);
-  const totalDue      = suppliers.reduce((s, r) => s + (Number(r.total_amount || 0) - Number(r.amount_paid || 0)), 0);
+  const totalPaid = groupedSuppliers.reduce(
+    (sum, group) => sum + getGroupAmountPaid(group.entries),
+    0
+  );
+  const totalDue = groupedSuppliers.reduce(
+    (sum, group) => sum + (getGroupTotalAmount(group.entries) - getGroupAmountPaid(group.entries)),
+    0
+  );
 
   // live balance preview in form
-  const formBalance = formData.total_amount && formData.amount_paid
-    ? Number(formData.total_amount) - Number(formData.amount_paid)
+  const resolvedFormTotalAmount = selectedSizes.length > 1
+    ? roundCurrency(
+        selectedSizes.reduce(
+          (sum, size) => sum + toSafeNumber(formData.size_amounts?.[size]),
+          0
+        )
+      )
+    : roundCurrency(toSafeNumber(formData.total_amount));
+
+  const hasAmountInput = selectedSizes.length > 1
+    ? selectedSizes.some((size) => formData.size_amounts?.[size] !== "" && formData.size_amounts?.[size] !== undefined)
+    : formData.total_amount !== "";
+
+  const formBalance = hasAmountInput || formData.amount_paid !== ""
+    ? roundCurrency(resolvedFormTotalAmount - toSafeNumber(formData.amount_paid))
     : null;
 
   return (
@@ -660,12 +1027,35 @@ const handleCylinderSizeChange = (size) => {
                   <div className="sp-grid-2">
                     <div className="sp-field">
                       <label className="sp-label">Qty Received *</label>
-                      <input
-                        type="number" className="sp-input"
-                        name="quantity_received" placeholder="0" min="0"
-                        value={formData.quantity_received} onChange={handleChange}
-                        required
-                      />
+                      {selectedSizes.length <= 1 ? (
+                        <input
+                          type="text"
+                          className="sp-input"
+                          name="quantity_received"
+                          placeholder="0"
+                          min="0"
+                          value={formData.quantity_received}
+                          onChange={handleChange}
+                          required
+                          disabled={!formData.cylinder_size}
+                        />
+                      ) : (
+                        <div style={{ display: "grid", gap: "0.75rem" }}>
+                          {selectedSizes.map((size) => (
+                            <div key={size} className="sp-field">
+                              <label className="sp-label">{size} Qty *</label>
+                              <input
+                                type="text"
+                                className="sp-input"
+                                min="0"
+                                value={formData.size_quantities?.[size] || ""}
+                                onChange={(e) => handleSizeQuantityChange(size, e.target.value)}
+                                required
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="sp-field">
                       <label className="sp-label">Date Received *</label>
@@ -687,17 +1077,49 @@ const handleCylinderSizeChange = (size) => {
                   <div className="sp-grid-2">
                     <div className="sp-field">
                       <label className="sp-label">Total Amount (NPR)</label>
-                      <input
-                        type="text" className="sp-input"
-                        name="total_amount" placeholder="0.00" min="0"
-                        value={formData.total_amount} onChange={handleChange}
-                      />
+                      {selectedSizes.length > 1 ? (
+                        <div style={{ display: "grid", gap: "0.75rem" }}>
+                          {selectedSizes.map((size) => (
+                            <div key={size} className="sp-field">
+                              <label className="sp-label">{size} Amount *</label>
+                              <input
+                                type="text"
+                                className="sp-input"
+                                min="0"
+                                step="0.01"
+                                placeholder="0.00"
+                                value={formData.size_amounts?.[size] || ""}
+                                onChange={(e) => handleSizeAmountChange(size, e.target.value)}
+                                required
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <input
+                          type="text" className="sp-input"
+                          name="total_amount" placeholder="0.00" min="0"
+                          value={formData.total_amount} onChange={handleChange}
+                          disabled={!formData.cylinder_size}
+                        />
+                      )}
                     </div>
                     <div className="sp-field">
+                      {selectedSizes.length > 1 && (
+                        <>
+                          <label className="sp-label">Combined Total (NPR)</label>
+                          <input
+                            type="text"
+                            className="sp-input"
+                            value={resolvedFormTotalAmount}
+                            readOnly
+                          />
+                        </>
+                      )}
                       <label className="sp-label">Amount Paid (NPR)</label>
                       <input
                         type="text" className="sp-input"
-                        name="amount_paid" placeholder="0.00" min="0"
+                        name="amount_paid" placeholder="0.00" min="0" step="0.01"
                         value={formData.amount_paid} onChange={handleChange}
                       />
                     </div>
@@ -737,15 +1159,6 @@ const handleCylinderSizeChange = (size) => {
         {suppliers.length > 0 && (
           <div className="sp-summary">
             <div className="sp-stat">
-              <div className="sp-stat-label">Total Suppliers</div>
-              <div className="sp-stat-value">{suppliers.length}</div>
-            </div>
-            <div className="sp-stat">
-              <div className="sp-stat-label">Qty Received</div>
-              <div className="sp-stat-value">{totalReceived}</div>
-            </div>
-
-            <div className="sp-stat">
               <div className="sp-stat-label">Total Paid</div>
               <div className="sp-stat-value">NPR {totalPaid.toLocaleString()}</div>
             </div>
@@ -766,12 +1179,8 @@ const handleCylinderSizeChange = (size) => {
                 <th>Supplier Name</th>
                 <th>Category</th>
                 <th>Item Type</th>
-                <th>Cyl. Size</th>
-                <th>Qty Received</th>
-                <th>Date Received</th>
                 <th>Total Amount</th>
                 <th>Amount Paid</th>
-                <th>Balance</th>
                 <th>Audit Trail</th>
                 <th>Actions</th>
               </tr>
@@ -787,60 +1196,115 @@ const handleCylinderSizeChange = (size) => {
                   </td>
                 </tr>
               ) : (
-                paginatedSuppliers.map((s) => {
-                  const balance = Number(s.total_amount) - Number(s.amount_paid);
+                paginatedSuppliers.map((group) => {
+                  const totalAmount = getGroupTotalAmount(group.entries);
+                  const amountPaid = getGroupAmountPaid(group.entries);
+                  const findSupplierById = (id) => suppliers.find((ss) => ss.id === id);
                   return (
-                    <tr key={s.id}>
-                      <td><strong>{s.supplier_name}</strong></td>
-                      <td>
-                        <span className="sp-badge sp-badge-cat">
-                          {getCategoryName(s.category)}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="sp-badge sp-badge-type">
-                          {s.item_type}
-                        </span>
-                      </td>
-                      <td>{s.cylinder_size || "—"}</td>
-                      <td>{s.quantity_received}</td>
-                      <td>{new Date(s.date_received).toLocaleDateString()}</td>
-                      <td>NPR {Number(s.total_amount).toLocaleString()}</td>
-                      <td>NPR {Number(s.amount_paid).toLocaleString()}</td>
-                      <td>
-                        <span className={`sp-badge ${balance <= 0 ? "sp-badge-paid" : "sp-badge-due"}`}>
-                          {balance <= 0 ? "Paid" : `NPR ${balance.toLocaleString()}`}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="sp-audit">
-                          <span className="sp-audit-user">
-                            {s.created_by_name || "Not recorded"}
+                    <>
+                      <tr key={group.key}>
+                        <td>
+                          <button className="sp-action-btn" onClick={() => toggleGroup(group.key)} style={{ marginRight: 8 }}>
+                            {expandedGroups[group.key] ? 'v' : '<'}
+                          </button>
+                          <strong>{group.supplier_name}</strong>
+                        </td>
+                        <td>
+                          <span className="sp-badge sp-badge-cat">
+                            {getCategoryName(group.category)}
                           </span>
-                          <span className="sp-audit-time">
-                            {formatAuditTimestamp(s.created_at)}
+                        </td>
+                        <td>
+                          <span className="sp-badge sp-badge-type">
+                            {group.item_type}
                           </span>
-                        </div>
-                      </td>
-                      <td>
-                        <button
-                          className="sp-action-btn sp-btn-edit"
-                          onClick={() => handleEdit(s)}
-                          title={isAdmin ? "Edit" : "Admin only"}
-                          disabled={!isAdmin}
-                        >
-                          <i className="bi bi-pencil-fill"></i> E
-                        </button>{" "}
-                        <button
-                          className="sp-action-btn sp-btn-delete"
-                          onClick={() => handleDelete(s.id)}
-                          title={isAdmin ? "Delete" : "Admin only"}
-                          disabled={!isAdmin}
-                        >
-                          <i className="bi bi-trash-fill"></i> D
-                        </button>
-                      </td>
-                    </tr>
+                        </td>
+                        
+                        <td>NPR {Number(totalAmount).toLocaleString()}</td>
+                        <td>NPR {Number(amountPaid).toLocaleString()}</td>
+                        <td>
+                          <div className="sp-audit">
+                            <span className="sp-audit-user">
+                              {group.created_by_name || "Not recorded"}
+                            </span>
+                            <span className="sp-audit-time">
+                              {formatAuditTimestamp(group.created_at)}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="sp-action-wrap">
+                            <button
+                              className="sp-action-btn sp-btn-delete"
+                              onClick={() => handleDeleteAllSupplier(group)}
+                              disabled={!isAdmin}
+                              title="Delete all records for this supplier"
+                            >
+                              <i className="bi bi-trash-fill"></i> Delete
+                            </button>
+                            <button
+                              className="sp-action-btn sp-btn-edit"
+                              onClick={() => handleMarkGroupAllPaid(group)}
+                              disabled={!isAdmin}
+                              title="Set all records to fully paid"
+                            >
+                              <i className="bi bi-check-circle-fill"></i> All paid
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {expandedGroups[group.key] && (
+                        <tr key={`${group.key}-details`}>
+                          <td colSpan="11" style={{ padding: 12 }}>
+                            <div style={{ background: '#fff', borderRadius: 8, padding: 8 }}>
+                              <table className="sp-details-table" style={{width: '100%', tableLayout: 'auto' }}>
+                                <thead>
+                                  <tr style={{ borderBottom: '1px solid #eee' }}>
+                                    <th style={{ textAlign: 'left', padding: 6 }}>Size</th>
+                                    <th style={{ textAlign: 'left', padding: 6 }}>Qty</th>
+                                    <th style={{ textAlign: 'left', padding: 6 }}>Date Received</th>
+                                    <th style={{ textAlign: 'left', padding: 6 }}>Total Amount</th>
+                                    <th style={{ textAlign: 'right', padding: 6 }}>Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {group.entries.map((e) => (
+                                    <tr key={e.id} style={{ borderBottom: '1px solid #fafafa' }}>
+                                      <td style={{ padding: 6 }}>{e.cylinder_size || '—'}</td>
+                                      <td style={{ padding: 6 }}>{e.quantity_received}</td>
+                                      <td style={{ padding: 6 }}>{e.date_received ? new Date(e.date_received).toLocaleDateString() : '—'}</td>
+                                      <td style={{ padding: 6 }}>NPR {Number(e.total_amount || 0).toLocaleString()}</td>
+                                     
+                                  <td className="sp-action-cell">
+                                    <div className="sp-action-wrap">
+
+                                      <button
+                                        className="sp-action-btn sp-btn-edit"
+                                        onClick={() => handleEdit(findSupplierById(e.id))}
+                                        disabled={!isAdmin}
+                                      >
+                                        <i className="bi bi-pencil-fill"></i> E
+                                      </button>
+
+                                      <button
+                                        className="sp-action-btn sp-btn-delete"
+                                        onClick={() => handleDelete(e.id)}
+                                        disabled={!isAdmin}
+                                      >
+                                        <i className="bi bi-trash-fill"></i>D
+                                      </button>
+
+                                    </div>
+                                  </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
                   );
                 })
               )}

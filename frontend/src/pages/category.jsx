@@ -525,7 +525,7 @@ export default function Category() {
                     <div className="ct-field">
                       <label className="ct-label">Quantity *</label>
                       <input
-                        type="number"
+                        type="text"
                         className="ct-input"
                         name="quantity"
                         placeholder="0"

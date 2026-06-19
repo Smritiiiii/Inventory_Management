@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { fetchCategoriesFromItemTypes } from "../utils/categories";
+import { formatCustomerPurchaseLabel } from "../utils/customerLabels";
 import { isCurrentUserAdmin } from "../utils/auth";
 import { formatAuditTimestamp } from "../utils/audit";
 
@@ -227,6 +229,40 @@ const styles = `
     padding: 2rem 2.5rem;
   }
 
+  .ct-mode-switch {
+    display: flex;
+    gap: 1rem;
+    padding: 2rem 2.5rem 1rem;
+    flex-wrap: wrap;
+  }
+
+  .ct-mode-btn {
+    flex: 1 1 240px;
+    min-width: 240px;
+    border: 1px solid #e4ddd2;
+    background: #f7f4ee;
+    color: #5a5a5a;
+    border-radius: 999px;
+    padding: 0.8rem 1rem;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .ct-mode-btn:hover {
+    background: #f1ebe2;
+    color: #1a1a1a;
+  }
+
+  .ct-mode-btn.active {
+    background: #c0392b;
+    color: #fff;
+    border-color: #c0392b;
+    box-shadow: 0 6px 18px rgba(192, 57, 43, 0.18);
+  }
+
   .ct-field {
     margin-bottom: 1.1rem;
   }
@@ -348,10 +384,15 @@ const styles = `
     box-shadow: 0 2px 20px rgba(0, 0, 0, 0.07);
   }
 
+  .ct-table-scroll {
+    overflow-x: auto;
+  }
+
   .ct-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 0.875rem;
+    min-width: 720px;
   }
 
   .ct-table thead tr {
@@ -378,9 +419,27 @@ const styles = `
 
   .ct-table tbody td {
     padding: 0.85rem 1rem;
+    vertical-align: middle;
   }
+
+  .ct-customer-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: #faf8f4;
+    border: 1px solid #ece7dc;
+    border-radius: 12px;
+    padding: 0.9rem 1rem;
+  }
+
+  .ct-customer-summary .ct-label {
+    margin-bottom: 0;
+  }
+
   .ct-action-btn {
-    width: 32px;
+    // width: px;
     height: 32px;
     border-radius: 8px;
     border: none;
@@ -470,6 +529,9 @@ const styles = `
     .ct-form-body {
       padding: 1.5rem;
     }
+    .ct-mode-switch {
+      padding: 1rem 1.5rem 1rem;
+    }
     .ct-inventory-grid {
       grid-template-columns: 1fr;
     }
@@ -479,18 +541,27 @@ const styles = `
     }
   }
 `;
-
 const CylinderTracking = () => {
   const [activeTab, setActiveTab] = useState("transactions");
-  const inventory = [];
   const [allTransactions, setAllTransactions] = useState([]);
-  const [categories, setCategories] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
-  const [formData, setFormData] = useState(initialTransactionState);
-  const [allItemTypes, setAllItemTypes] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const isAdmin = isCurrentUserAdmin();
+
+  // Which of the two transaction modes is active in the log form
+  // "sent_for_refill" | "received_empty"
+  const [logMode, setLogMode] = useState("sent_for_refill");
+
+  // Sent for refill: qty/notes/date keyed by supplier row id
+  const [refillRows, setRefillRows] = useState({});
+
+  // Received empty: selected customer (by name+phone) and qty/notes/date keyed by that customer's row ids
+  const [selectedCustomerKey, setSelectedCustomerKey] = useState("");
+  const [returnRows, setReturnRows] = useState({});
+  const [customerSearch, setCustomerSearch] = useState("");
+
+  const todayISO = () => new Date().toISOString().slice(0, 10);
 
   // Filter states
   const [searchQuery, setSearchQuery] = useState("");
@@ -512,18 +583,6 @@ const CylinderTracking = () => {
       .then(setAllTransactions)
       .catch((err) => console.error("Transactions fetch error", err));
 
-    fetchAllPages("/api/categories/")
-      .then((cats) =>
-        setCategories(
-          cats.filter((category) => category.name?.trim().toLowerCase() !== "accessory")
-        )
-      )
-      .catch((err) => console.error("Categories fetch error", err));
-
-    fetchAllPages("/api/item-types/")
-      .then(setAllItemTypes)
-      .catch((err) => console.error("Item types fetch error", err));
-
     fetchAllPages("/api/customers/")
       .then(setCustomers)
       .catch((err) => console.error("Customers fetch error", err));
@@ -532,12 +591,6 @@ const CylinderTracking = () => {
       .then(setSuppliers)
       .catch((err) => console.error("Suppliers fetch error", err));
   }, []);
-
-  const itemTypes = formData.category
-    ? allItemTypes.filter(
-        (itemType) => String(itemType.category) === String(formData.category)
-      )
-    : [];
 
   const filteredTransactions = allTransactions.filter((transactionRecord) => {
     const matchesSearch = searchQuery
@@ -560,69 +613,178 @@ const CylinderTracking = () => {
     return matchesSearch && matchesStartDate && matchesEndDate;
   });
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+  // ---------- Sent for refill helpers ----------
+
+  const getRefillRow = (supplierId) =>
+    refillRows[supplierId] || { qty: "", notes: "", date: todayISO() };
+
+  const updateRefillRow = (supplierId, field, value) => {
+    setRefillRows((prev) => ({
+      ...prev,
+      [supplierId]: { ...getRefillRow(supplierId), [field]: value },
+    }));
   };
 
-  const handleSubmit = async (e) => {
+  const resetRefillForm = () => setRefillRows({});
+
+  // ---------- Received empty (customer) helpers ----------
+
+  const customerKey = (cust) => `${cust.full_name}__${cust.phone}`;
+
+  // Unique customers by name+phone, for the selector list
+  const uniqueCustomerOptions = Object.values(
+    customers.reduce((acc, cust) => {
+      const key = customerKey(cust);
+      if (!acc[key]) acc[key] = cust;
+      return acc;
+    }, {})
+  );
+
+  // Unique customers filtered by the search box
+  const visibleCustomerOptions = customerSearch
+    ? uniqueCustomerOptions.filter(
+        (cust) =>
+          cust.full_name.toLowerCase().includes(customerSearch.toLowerCase()) ||
+          cust.phone.toLowerCase().includes(customerSearch.toLowerCase())
+      )
+    : uniqueCustomerOptions;
+
+  // All DB rows (item_type/size/qty) belonging to the selected customer
+  const selectedCustomerRows = selectedCustomerKey
+    ? customers.filter((cust) => customerKey(cust) === selectedCustomerKey)
+    : [];
+
+  const getReturnRow = (rowId) =>
+    returnRows[rowId] || { qty: "", notes: "", date: todayISO() };
+
+  const updateReturnRow = (rowId, field, value) => {
+    setReturnRows((prev) => ({
+      ...prev,
+      [rowId]: { ...getReturnRow(rowId), [field]: value },
+    }));
+  };
+
+  const resetReturnForm = () => {
+    setSelectedCustomerKey("");
+    setReturnRows({});
+    setCustomerSearch("");
+  };
+
+  const handleModeChange = (mode) => {
+    setLogMode(mode);
+    setEditingId(null);
+  };
+
+  // ---------- Submit ----------
+
+  const postTransaction = async (token, payload) => {
+    const res = await fetch("http://127.0.0.1:8000/api/cylinder-transactions/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  };
+
+  const handleSubmitRefill = async (e) => {
     e.preventDefault();
-    if (editingId && !isAdmin) {
-      alert("Only admins can edit cylinder transactions.");
-      return;
-    }
     const token = localStorage.getItem("access");
 
-    const payload = {
-      category: Number(formData.category),
-      item_type: formData.item_type,
-      cylinder_size: formData.cylinder_size,
-      transaction_type: formData.transaction_type,
-      quantity: Number(formData.quantity),
-      customer: formData.customer ? Number(formData.customer) : null,
-      supplier: formData.supplier ? Number(formData.supplier) : null,
-      notes: formData.notes,
-      transaction_date: formData.transaction_date,
-    };
+    const rowsToSubmit = suppliers
+      .map((supplier) => ({ supplier, row: getRefillRow(supplier.id) }))
+      .filter(({ row }) => Number(row.qty) > 0);
+
+    if (rowsToSubmit.length === 0) {
+      alert("Enter a quantity for at least one cylinder before logging.");
+      return;
+    }
 
     try {
-      let res;
-      if (editingId) {
-        // Update existing transaction
-        res = await fetch(`http://127.0.0.1:8000/api/cylinder-transactions/${editingId}/`, {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(payload),
-        });
+      let allOk = true;
+      for (const { supplier, row } of rowsToSubmit) {
+        const payload = {
+          item_type: supplier.item_type,
+          cylinder_size: supplier.cylinder_size,
+          transaction_type: "sent_for_refill",
+          quantity: Number(row.qty),
+          customer: null,
+          supplier: supplier.id,
+          notes: row.notes || "",
+          transaction_date: row.date || todayISO(),
+        };
+        const ok = await postTransaction(token, payload);
+        if (!ok) allOk = false;
+      }
+
+      if (!allOk) {
+        alert("Some transactions failed to save. Please check and retry.");
       } else {
-        // Create new transaction
-        res = await fetch("http://127.0.0.1:8000/api/cylinder-transactions/", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(payload),
-        });
+        alert("Transaction(s) logged successfully");
       }
 
-      if (!res.ok) {
-        alert("Failed to save transaction");
-        return;
-      }
-
-      alert(editingId ? "Transaction updated successfully" : "Transaction logged successfully");
-      setFormData(initialTransactionState);
-      setEditingId(null);
-
+      resetRefillForm();
       await loadTransactions();
     } catch (err) {
-      console.error("Transaction save error", err);
+      console.error("Refill transaction save error", err);
     }
   };
+
+  const handleSubmitReturn = async (e) => {
+    e.preventDefault();
+    const token = localStorage.getItem("access");
+
+    if (!selectedCustomerKey) {
+      alert("Select a customer first.");
+      return;
+    }
+
+    const rowsToSubmit = selectedCustomerRows
+      .map((custRow, idx) => ({
+        custRow,
+        rowId: `${selectedCustomerKey}__${idx}`,
+        row: getReturnRow(`${selectedCustomerKey}__${idx}`),
+      }))
+      .filter(({ row }) => Number(row.qty) > 0);
+
+    if (rowsToSubmit.length === 0) {
+      alert("Enter a returned quantity for at least one cylinder before logging.");
+      return;
+    }
+
+    try {
+      let allOk = true;
+      for (const { custRow, row } of rowsToSubmit) {
+        const payload = {
+          item_type: custRow.item_type,
+          cylinder_size: custRow.cylinder_size,
+          transaction_type: "received_empty",
+          quantity: Number(row.qty),
+          customer: custRow.id,
+          supplier: null,
+          notes: row.notes || "",
+          transaction_date: row.date || todayISO(),
+        };
+        const ok = await postTransaction(token, payload);
+        if (!ok) allOk = false;
+      }
+
+      if (!allOk) {
+        alert("Some transactions failed to save. Please check and retry.");
+      } else {
+        alert("Transaction(s) logged successfully");
+      }
+
+      resetReturnForm();
+      await loadTransactions();
+    } catch (err) {
+      console.error("Return transaction save error", err);
+    }
+  };
+
+  // ---------- Display helpers ----------
 
   const getTransactionBadgeClass = (type) => {
     switch (type) {
@@ -645,7 +807,7 @@ const CylinderTracking = () => {
     const labels = {
       received_filled: "Received (Filled)",
       given_to_customer: "Given to Customer",
-      received_empty: "Received (Empty)",
+      received_empty: "Empty Received from Customer",
       sent_for_refill: "Sent for Refill",
       received_refilled: "Received (Refilled)",
       stock_adjustment: "Stock Adjustment",
@@ -665,31 +827,6 @@ const CylinderTracking = () => {
     setSearchQuery("");
     setFilterStartDate("");
     setFilterEndDate("");
-  };
-
-
-  const handleEdit = (tracking) => {
-    if (!isAdmin) {
-      alert("Only admins can edit cylinder transactions.");
-      return;
-    }
-    setEditingId(tracking.id);
-    setFormData({
-      category: tracking.category,
-      item_type: tracking.item_type,
-      cylinder_size: tracking.cylinder_size,
-      transaction_type: tracking.transaction_type,
-      quantity: tracking.quantity,
-      customer: tracking.customer || "",
-      supplier: tracking.supplier || "",
-      transaction_date: tracking.transaction_date,
-      notes: tracking.notes,
-    });
-    setActiveTab("transactions");
-    // Scroll to form
-    setTimeout(() => {
-      document.querySelector(".ct-form-card")?.scrollIntoView({ behavior: "smooth" });
-    }, 100);
   };
 
   const handleDelete = async (id) => {
@@ -742,237 +879,282 @@ const CylinderTracking = () => {
           </button>
         </div>
 
-        {/* Inventory Tab */}
-        {activeTab === "inventory" && (
-          <div>
-            {inventory.length === 0 ? (
-              <div className="ct-table-card">
-                <div className="ct-empty">
-                  <div className="ct-empty-icon">📦</div>
-                  No cylinder inventory found. Log transactions to populate inventory.
-                </div>
-              </div>
-            ) : (
-              <div className="ct-inventory-grid">
-                {inventory.map((inv) => (
-                  <div key={inv.id} className="ct-inventory-card">
-                    <div className="ct-card-title">{inv.category_name}</div>
-                    <div className="ct-card-subtitle">
-                      {inv.item_type} • {inv.cylinder_size}
-                    </div>
-                    <div className="ct-stat">
-                      <span className="ct-stat-label">Filled:</span>
-                      <span className="ct-stat-value ct-stat-filled">
-                        {inv.filled_quantity}
-                      </span>
-                    </div>
-                    <div className="ct-stat">
-                      <span className="ct-stat-label">Empty:</span>
-                      <span className="ct-stat-value ct-stat-empty">
-                        {inv.empty_quantity}
-                      </span>
-                    </div>
-                    <div className="ct-stat">
-                      <span className="ct-stat-label">In Refill:</span>
-                      <span className="ct-stat-value ct-stat-refill">
-                        {inv.in_refill_quantity}
-                      </span>
-                    </div>
-                    <div className="ct-stat">
-                      <span className="ct-stat-label">Total:</span>
-                      <span className="ct-stat-value ct-stat-total">
-                        {inv.total_quantity}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Log Transaction Tab */}
         {activeTab === "transactions" && (
           <div className="ct-form-card">
             <div className="ct-form-hero">
-              <h3>{editingId ? "Edit Cylinder Transaction" : "Log Cylinder Transaction"}</h3>
-              <p>{editingId ? "Update transaction details" : "Record cylinder movements and status changes"}</p>
+              <h3>Log Cylinder Transaction</h3>
+              <p>Record cylinder movements and status changes</p>
             </div>
+
+            {/* Mode switch */}
+            <div className="ct-mode-switch">
+              <button
+                type="button"
+                className={`ct-mode-btn ${logMode === "sent_for_refill" ? "active" : ""}`}
+                onClick={() => handleModeChange("sent_for_refill")}
+              >
+                Record Cylinder Sent for Refill
+              </button>
+              <button
+                type="button"
+                className={`ct-mode-btn ${logMode === "received_empty" ? "active" : ""}`}
+                onClick={() => handleModeChange("received_empty")}
+              >
+                Record Empty Received from Customer
+              </button>
+            </div>
+
             <div className="ct-form-body">
-              <form onSubmit={handleSubmit}>
-                <div className="ct-grid-3">
-                  <div className="ct-field">
-                    <label className="ct-label">Category *</label>
-                    <div className="ct-select-wrap">
-                      <select
-                        className="ct-select"
-                        name="category"
-                        value={formData.category}
-                        onChange={handleChange}
-                        required
-                      >
-                        <option value="">Select category</option>
-                        {categories.map((cat) => (
-                          <option key={cat.id} value={cat.id}>
-                            {cat.name}
-                          </option>
-                        ))}
-                      </select>
+              {/* ---------- Sent for refill ---------- */}
+              {logMode === "sent_for_refill" && (
+                <form onSubmit={handleSubmitRefill}>
+                  <div className="ct-table-card ct-table-scroll" style={{ marginBottom: "1rem" }}>
+                    <table className="ct-table">
+                      <thead>
+                        <tr>
+                          <th>Supplier</th>
+                          <th>Item Type</th>
+                          <th>Size</th>
+                          <th>Received Date</th>
+                          <th>Sent for Refill</th>
+                          <th>Notes</th>
+                          <th>Date</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {suppliers.length === 0 ? (
+                          <tr>
+                            <td colSpan="7">
+                              <div className="ct-empty">
+                                <div className="ct-empty-icon">📋</div>
+                                No suppliers found
+                              </div>
+                            </td>
+                          </tr>
+                        ) : (
+                          suppliers.map((supplier) => {
+                            const row = getRefillRow(supplier.id);
+                            return (
+                              <tr key={supplier.id}>
+                                <td>{supplier.supplier_name}</td>
+                                <td>{supplier.item_type}</td>
+                                <td>{supplier.cylinder_size}</td>
+                                <td>{supplier.date_received ? fmt(supplier.date_received) : "—"}</td>
+                                <td>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="ct-input"
+                                    placeholder="0"
+                                    value={row.qty}
+                                    onChange={(e) =>
+                                      updateRefillRow(supplier.id, "qty", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    type="text"
+                                    className="ct-input"
+                                    placeholder="optional"
+                                    value={row.notes}
+                                    onChange={(e) =>
+                                      updateRefillRow(supplier.id, "notes", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    type="date"
+                                    className="ct-input"
+                                    value={row.date}
+                                    onChange={(e) =>
+                                      updateRefillRow(supplier.id, "date", e.target.value)
+                                    }
+                                  />
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="ct-form-footer">
+                    <button type="button" className="ct-btn-cancel" onClick={resetRefillForm}>
+                      Clear
+                    </button>
+                    <button type="submit" className="ct-btn-submit">
+                      Log Transaction
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* ---------- Received empty from customer ---------- */}
+              {logMode === "received_empty" && (
+                <form onSubmit={handleSubmitReturn}>
+                  {!selectedCustomerKey ? (
+                    <div className="ct-field">
+                      <label className="ct-label">Customer *</label>
+                      <input
+                        type="text"
+                        className="ct-input"
+                        placeholder="Search by name or phone..."
+                        value={customerSearch}
+                        onChange={(e) => setCustomerSearch(e.target.value)}
+                        style={{ marginBottom: "0.75rem" }}
+                      />
+                      <div className="ct-table-card ct-table-scroll">
+                        <table className="ct-table">
+                          <thead>
+                            <tr>
+                              <th>Name</th>
+                              <th>Phone</th>
+                              <th></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visibleCustomerOptions.length === 0 ? (
+                              <tr>
+                                <td colSpan="3">
+                                  <div className="ct-empty">
+                                    <div className="ct-empty-icon">📋</div>
+                                    No customers found
+                                  </div>
+                                </td>
+                              </tr>
+                            ) : (
+                              visibleCustomerOptions.map((cust) => (
+                                <tr key={customerKey(cust)}>
+                                  <td>{cust.full_name}</td>
+                                  <td>{cust.phone}</td>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className="ct-action-btn ct-btn-edit"
+                                      onClick={() => {
+                                        setSelectedCustomerKey(customerKey(cust));
+                                        setReturnRows({});
+                                      }}
+                                    >
+                                      Select
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  </div>
-
-                  <div className="ct-field">
-                    <label className="ct-label">Item Type *</label>
-                    <div className="ct-select-wrap">
-                      <select
-                        className="ct-select"
-                        name="item_type"
-                        value={formData.item_type}
-                        onChange={handleChange}
-                        required
-                        disabled={!formData.category}
-                      >
-                        <option value="">Select type</option>
-                        {itemTypes.map((it) => (
-                          <option key={it.id} value={it.name}>
-                            {it.name}
-                          </option>
-                        ))}
-                      </select>
+                  ) : (
+                    <div className="ct-field">
+                      <div className="ct-customer-summary">
+                        <label className="ct-label">
+                          Customer: <strong>{selectedCustomerRows[0]?.full_name}</strong> — {selectedCustomerRows[0]?.phone}
+                        </label>
+                        <button
+                          type="button"
+                          className="ct-btn-cancel"
+                          onClick={() => {
+                            setSelectedCustomerKey("");
+                            setReturnRows({});
+                            setCustomerSearch("");
+                          }}
+                        >
+                          Change Customer
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
-                  <div className="ct-field">
-                    <label className="ct-label">Cylinder Size *</label>
-                    <input
-                      type="text"
-                      className="ct-input"
-                      name="cylinder_size"
-                      placeholder="e.g. 47L, Small, Medium"
-                      value={formData.cylinder_size}
-                      onChange={handleChange}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="ct-grid-2">
-                  <div className="ct-field">
-                    <label className="ct-label">Transaction Type *</label>
-                    <div className="ct-select-wrap">
-                      <select
-                        className="ct-select"
-                        name="transaction_type"
-                        value={formData.transaction_type}
-                        onChange={handleChange}
-                        required
-                      >
-                        <option value="">Select transaction</option>
-                        <option value="received_empty">Received Empty from Customer</option>
-                        <option value="sent_for_refill">Sent to Supplier for refill </option>
-                        <option value="received_filled">Received Filled from Supplier</option>
-                        {/* <option value="given_to_customer">Given Filled to Customer</option> */}
-                        {/* <option value="received_refilled">Received Refilled from Company</option>
-                        <option value="stock_adjustment">Stock Adjustment</option> */}
-                      </select>
+                  {selectedCustomerKey && (
+                    <div className="ct-table-card ct-table-scroll" style={{ margin: "1rem 0" }}>
+                      <table className="ct-table">
+                        <thead>
+                          <tr>
+                            <th>Item Type</th>
+                            <th>Size</th>
+                            <th>Purchased Qty</th>
+                            <th>Returned (Empty)</th>
+                            <th>Notes</th>
+                            <th>Date</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedCustomerRows.length === 0 ? (
+                            <tr>
+                              <td colSpan="6">
+                                <div className="ct-empty">
+                                  <div className="ct-empty-icon">📋</div>
+                                  No purchase records for this customer
+                                </div>
+                              </td>
+                            </tr>
+                          ) : (
+                            selectedCustomerRows.map((custRow, idx) => {
+                              const rowId = `${selectedCustomerKey}__${idx}`;
+                              const row = getReturnRow(rowId);
+                              return (
+                                <tr key={rowId}>
+                                  <td>{custRow.item_type}</td>
+                                  <td>{custRow.cylinder_size}</td>
+                                  <td>{custRow.quantity}</td>
+                                  <td>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      className="ct-input"
+                                      placeholder="0"
+                                      value={row.qty}
+                                      onChange={(e) =>
+                                        updateReturnRow(rowId, "qty", e.target.value)
+                                      }
+                                    />
+                                  </td>
+                                  <td>
+                                    <input
+                                      type="text"
+                                      className="ct-input"
+                                      placeholder="optional"
+                                      value={row.notes}
+                                      onChange={(e) =>
+                                        updateReturnRow(rowId, "notes", e.target.value)
+                                      }
+                                    />
+                                  </td>
+                                  <td>
+                                    <input
+                                      type="date"
+                                      className="ct-input"
+                                      value={row.date}
+                                      onChange={(e) =>
+                                        updateReturnRow(rowId, "date", e.target.value)
+                                      }
+                                    />
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
                     </div>
+                  )}
+
+                  <div className="ct-form-footer">
+                    <button type="button" className="ct-btn-cancel" onClick={resetReturnForm}>
+                      Clear
+                    </button>
+                    <button type="submit" className="ct-btn-submit">
+                      Log Transaction
+                    </button>
                   </div>
-
-                  <div className="ct-field">
-                    <label className="ct-label">Quantity *</label>
-                    <input
-                      type="number"
-                      className="ct-input"
-                      name="quantity"
-                      placeholder="0"
-                      min="1"
-                      value={formData.quantity}
-                      onChange={handleChange}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="ct-grid-2">
-                  <div className="ct-field">
-                    <label className="ct-label">Customer</label>
-                    <div className="ct-select-wrap">
-                      <select
-                        className="ct-select"
-                        name="customer"
-                        value={formData.customer}
-                        onChange={handleChange}
-                      >
-                        <option value="">Select customer (optional)</option>
-                        {customers.map((cust) => (
-                          <option key={cust.id} value={cust.id}>
-                            {cust.full_name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="ct-field">
-                    <label className="ct-label">Supplier</label>
-                    <div className="ct-select-wrap">
-                      <select
-                        className="ct-select"
-                        name="supplier"
-                        value={formData.supplier}
-                        onChange={handleChange}
-                      >
-                        <option value="">Select supplier (optional)</option>
-                        {suppliers.map((supp) => (
-                          <option key={supp.id} value={supp.id}>
-                            {supp.supplier_name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="ct-field">
-                  <label className="ct-label">Transaction Date *</label>
-                  <input
-                    type="date"
-                    className="ct-input"
-                    name="transaction_date"
-                    value={formData.transaction_date}
-                    onChange={handleChange}
-                    required
-                  />
-                </div>
-
-                <div className="ct-field">
-                  <label className="ct-label">Notes</label>
-                  <textarea
-                    className="ct-input"
-                    name="notes"
-                    placeholder="Add any notes..."
-                    value={formData.notes}
-                    onChange={handleChange}
-                    style={{ minHeight: "80px" }}
-                  />
-                </div>
-
-                <div className="ct-form-footer">
-                  <button
-                    type="button"
-                    className="ct-btn-cancel"
-                    onClick={() => {
-                      setFormData(initialTransactionState);
-                      setEditingId(null);
-                    }}
-                  >
-                    {editingId ? "Cancel" : "Clear"}
-                  </button>
-                  <button type="submit" className="ct-btn-submit">
-                    {editingId ? "Update Transaction" : "Log Transaction"}
-                  </button>
-                </div>
-              </form>
+                </form>
+              )}
             </div>
           </div>
         )}
@@ -1027,7 +1209,6 @@ const CylinderTracking = () => {
               <table className="ct-table">
                 <thead>
                   <tr>
-                    <th>Category</th>
                     <th>Item Type</th>
                     <th>Cylinder Size</th>
                     <th>Type</th>
@@ -1042,7 +1223,7 @@ const CylinderTracking = () => {
                 <tbody>
                   {filteredTransactions.length === 0 ? (
                     <tr>
-                      <td colSpan="10">
+                      <td colSpan="9">
                         <div className="ct-empty">
                           <div className="ct-empty-icon">📋</div>
                           {searchQuery || filterStartDate || filterEndDate
@@ -1054,7 +1235,6 @@ const CylinderTracking = () => {
                   ) : (
                     filteredTransactions.map((trans) => (
                       <tr key={trans.id}>
-                        <td>{trans.category_name}</td>
                         <td>{trans.item_type}</td>
                         <td>{trans.cylinder_size}</td>
                         <td>
@@ -1089,14 +1269,6 @@ const CylinderTracking = () => {
                           </div>
                         </td>
                         <td>
-                          <button
-                            className="ct-action-btn ct-btn-edit"
-                            onClick={() => handleEdit(trans)}
-                            title={isAdmin ? "Edit" : "Admin only"}
-                            disabled={!isAdmin}
-                          >
-                            <i className="bi bi-pencil-fill"></i> E
-                          </button>{" "}
                           <button
                             className="ct-action-btn ct-btn-delete"
                             onClick={() => handleDelete(trans.id)}

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { formatCustomerPurchaseLabel } from "../utils/customerLabels";
 import { isCurrentUserAdmin } from "../utils/auth";
 import { formatAuditTimestamp } from "../utils/audit";
 
@@ -15,7 +16,7 @@ const initialFormState = {
   amount: "",
 };
 
-/* ── shared design system (mirrors Customer.jsx) ─────────────────── */
+
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap');
 
@@ -527,7 +528,6 @@ const DailySales = () => {
   const [formData, setFormData] = useState(initialFormState);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [categoriesData, setCategoriesData] = useState([]);
   // Filter state
   const [timeRange, setTimeRange] = useState("today");
   // selectedMonth: "YYYY-MM" string, defaults to current month
@@ -541,12 +541,6 @@ const DailySales = () => {
       .then(setAllItemTypes)
       .catch((err) => console.error("Item types fetch error", err));
   }, []);
-
-useEffect(() => {
-  fetchAllPages("/api/categories/")
-    .then(setCategoriesData)
-    .catch(console.error);
-}, []);
 
   function fetchCustomers() {
     fetchAllPages("/api/customers/")
@@ -613,19 +607,13 @@ useEffect(() => {
     return filtered;
   })();
 
-  // Accessory item types only — match by category name "accessory" (case-insensitive)
- // Find the numeric ID of the "accessory" category first
-const accessoryCategoryId = categoriesData.find(
-  (c) => c.name?.toLowerCase() === "accessory"
-)?.id;
-
-// Then filter item types by that numeric ID
-const accessoryItemTypes = allItemTypes.filter(
-  (it) => it.category === accessoryCategoryId
-);
-const selectedAccessory = accessoryItemTypes.find(
-  (item) => item.name === formData.item_type
-);
+  // Accessory item types only — filter by category "accessory" (case-insensitive)
+  const accessoryItemTypes = allItemTypes.filter(
+    (it) => it.category?.toLowerCase() === "accessory"
+  );
+  const selectedAccessory = accessoryItemTypes.find(
+    (item) => item.name === formData.item_type
+  );
 
   const handleSaleTypeChange = (type) => {
     setFormData({ ...initialFormState, sale_type: type });
@@ -687,7 +675,7 @@ const selectedAccessory = accessoryItemTypes.find(
       customer: formData.sale_type === "cylinder" ? parseInt(formData.customer) : null,
       phone: formData.phone || null,
       address: formData.address || null,
-      category: formData.sale_type === "cylinder" ? "Cylinder" : "Accessory",
+      category: formData.sale_type === "cylinder" ? "cylinder" : "accessory",
       item_type: formData.item_type || null,
       cylinder_size: formData.cylinder_size || null,
       refill: formData.refill,
@@ -856,7 +844,9 @@ const selectedAccessory = accessoryItemTypes.find(
                           >
                             <option value="">— Select Customer —</option>
                             {customers.map((c) => (
-                              <option key={c.id} value={c.id}>{c.full_name}</option>
+                              <option key={c.id} value={c.id}>
+                                {formatCustomerPurchaseLabel(c)}
+                              </option>
                             ))}
                           </select>
                         </div>
@@ -963,7 +953,7 @@ const selectedAccessory = accessoryItemTypes.find(
                     <div className="ds-field">
                       <label className="ds-label">Quantity *</label>
                       <input
-                        type="number"
+                        type="text"
                         className="ds-input"
                         name="quantity"
                         value={formData.quantity}
@@ -975,7 +965,7 @@ const selectedAccessory = accessoryItemTypes.find(
                     <div className="ds-field">
                       <label className="ds-label">Amount (NPR) *</label>
                       <input
-                        type="number"
+                        type="text"
                         className="ds-input"
                         name="amount"
                         value={formData.amount}

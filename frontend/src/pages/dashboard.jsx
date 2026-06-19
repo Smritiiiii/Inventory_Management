@@ -415,23 +415,25 @@ export default function Dashboard() {
     }
   };
 
-  const inventoryBreakdownRows = inventoryBreakdown
-    .filter((item) => {
-      const filled = item.full_in_stock || 0;
-      const empty = item.empty_in_stock || 0;
-      const inRefill = item.in_refill_quantity || 0;
-      return filled + empty + inRefill > 0;
-    })
-    .map((item) => ({
-      ...item,
-      inStockQuantity: item.total_in_stock || 0,
-    }))
-    .sort(
-      (a, b) =>
-        (a.item_type || "").localeCompare(b.item_type || "") ||
-        (sizeOrder[a.cylinder_size] ?? 99) - (sizeOrder[b.cylinder_size] ?? 99) ||
-        (a.cylinder_size || "").localeCompare(b.cylinder_size || "")
-    );
+const inventoryBreakdownRows = inventoryBreakdown
+  .filter((item) => {
+    const filled = item.full_in_stock || 0;
+    const empty = item.empty_in_stock || 0;
+    const inRefill = item.in_refill_quantity || 0;
+    return filled + empty + inRefill > 0;  // ← this is fine, keep as is
+  })
+  .map((item) => ({
+    ...item,
+    item_type: item.item_type || "",
+    cylinder_size: item.cylinder_size || "",
+    full_in_stock: Number(item.full_in_stock || 0),     
+  }))
+  .sort(
+    (a, b) =>
+      (a.item_type || "").localeCompare(b.item_type || "") ||
+      (sizeOrder[a.cylinder_size] ?? 99) - (sizeOrder[b.cylinder_size] ?? 99) ||
+      (a.cylinder_size || "").localeCompare(b.cylinder_size || "")
+  );
 
   if (loading) return (
     <>
@@ -533,7 +535,7 @@ export default function Dashboard() {
               <div className="db-breakdown">
                 <div className="db-breakdown-head">
                   <div className="db-breakdown-title">Cylinder Breakdown</div>
-                  <div className="db-breakdown-note">No. of cylinders = full + empty currently in stock</div>
+                  <div className="db-breakdown-note">Full cylinders currently available in stock</div>
                 </div>
 
                 {inventoryBreakdownRows.length === 0 ? (
@@ -547,27 +549,16 @@ export default function Dashboard() {
                         <tr>
                           <th>Type of Cylinder</th>
                           <th>Size</th>
-                          <th>No. of Cylinders</th>
-                          <th>Empty</th>
+                          <th>Total in Stock</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {inventoryBreakdownRows.map((item) => (
-                          <tr key={item.id}>
+                        {inventoryBreakdownRows.map((item, index) => (
+                          <tr key={`${item.item_type}-${item.cylinder_size}-${index}`}>
                             <td>{item.item_type}</td>
                             <td>{item.cylinder_size}</td>
                             <td>
-                              <div className="db-breakdown-value">{item.inStockQuantity}</div>
-                              {item.in_refill_quantity > 0 ? (
-                                <div className="db-breakdown-meta">
-                                  {item.in_refill_quantity} Sent for refill
-                                </div>
-                              ) : null}
-                            </td>
-                            <td>
-                              <div className="db-breakdown-value">
-                                {item.empty_in_stock}
-                              </div>
+                              <div className="db-breakdown-value">{item.full_in_stock || 0}</div>
                             </td>
                           </tr>
                         ))}

@@ -3,12 +3,10 @@ from rest_framework.routers import DefaultRouter
 from .views import *
 
 router = DefaultRouter()
-router.register('api/categories', CategoryViewSet)
 router.register('api/suppliers', SupplierViewSet)
 router.register("api/customers", CustomerViewSet)
 router.register("api/daily-sales", DailySaleViewSet, basename="daily-sale")
 router.register("api/item-types", ItemTypeViewSet)
-router.register("api/cylinder-inventory", CylinderInventoryViewSet, basename="cylinder-inventory")
 router.register("api/cylinder-transactions", CylinderTransactionViewSet, basename="cylinder-transaction")
 
 urlpatterns = [

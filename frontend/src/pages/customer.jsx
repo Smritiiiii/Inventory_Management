@@ -1,9 +1,12 @@
 import { useState, useEffect } from "react";
 import { fetchAllPages } from "../utils/paginated";
+import { fetchCategoriesFromItemTypes } from "../utils/categories";
 import { isCurrentUserAdmin } from "../utils/auth";
 import { formatAuditTimestamp } from "../utils/audit";
 
-const initialFormState = {
+const getTodayDate = () => new Date().toISOString().split("T")[0];
+
+const createInitialFormState = () => ({
   full_name: "",
   phone: "",
   address: "",
@@ -11,9 +14,24 @@ const initialFormState = {
   item_type: "",
   cylinder_size: "",
   quantity: "",
+  size_quantities: {},
+  size_amounts: {},
   deposit_amount: "",
-  deposit_date: new Date().toISOString().split("T")[0],
+  deposit_date: getTodayDate(),
   returned_date: "",
+});
+
+const parseSelectedSizes = (value) =>
+  value ? value.split(",").map((size) => size.trim()).filter(Boolean) : [];
+
+const toSafeNumber = (value) => {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const roundCurrency = (value) => {
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  return Object.is(rounded, -0) ? 0 : rounded;
 };
 
 /* ── inline styles ───────────────────────────────────────────────── */
@@ -108,6 +126,43 @@ const styles = `
   .cr-badge-returned { background: #eafaf1; color: #1e8449; }
   .cr-badge-pending { background: #fef9e7; color: #b7770d; }
 
+  .cr-checkbox-group {
+    display: flex;
+    gap: .75rem;
+    flex-wrap: wrap;
+    padding: .5rem 0;
+  }
+  .cr-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    cursor: pointer;
+    font-size: .9rem;
+    color: #1a1a1a;
+    background: #faf8f4;
+    border: 1.5px solid #e8e3da;
+    border-radius: 8px;
+    padding: .45rem .85rem;
+    transition: border-color .2s, background .2s;
+    user-select: none;
+  }
+  .cr-checkbox-label:hover {
+    border-color: #c0392b;
+    background: #fff;
+  }
+  .cr-checkbox-label input[type="checkbox"] {
+    accent-color: #c0392b;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+  .cr-checkbox-label.checked {
+    border-color: #c0392b;
+    background: #fdecea;
+    color: #c0392b;
+    font-weight: 600;
+  }
+
   .cr-empty {
     text-align: center;
     padding: 3rem 1rem;
@@ -118,7 +173,7 @@ const styles = `
 
   /* ── action buttons ── */
   .cr-action-btn {
-    width: 32px;
+    min-width: 32px;
     height: 32px;
     border-radius: 8px;
     border: none;
@@ -128,6 +183,8 @@ const styles = `
     justify-content: center;
     font-size: .85rem;
     transition: opacity .15s, transform .15s;
+    padding: 0 8px;
+    white-space: nowrap;
   }
   .cr-action-btn:hover { opacity: .8; transform: scale(1.1); }
   .cr-action-btn:disabled,
@@ -406,7 +463,7 @@ const Customer = () => {
   const [customers, setCustomers] = useState([]);
   const [categoriesData, setCategoriesData] = useState([]);
   const [allItemTypes, setAllItemTypes] = useState([]);
-  const [formData, setFormData] = useState(initialFormState);
+  const [formData, setFormData] = useState(createInitialFormState());
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -416,7 +473,7 @@ const Customer = () => {
 
   // Fetch categories
   useEffect(() => {
-    fetchAllPages("/api/categories/")
+    fetchCategoriesFromItemTypes()
       .then(setCategoriesData)
       .catch((err) => console.error("Category fetch error", err));
   }, []);
@@ -437,16 +494,58 @@ const Customer = () => {
   // Fetch customers
   useEffect(() => { fetchCustomers(); }, []);
 
-  const filteredCustomers = customers.filter((c) =>
-  c.full_name.toLowerCase().includes(searchQuery.toLowerCase())
-);
+ const filteredCustomers = customers.filter((c) => {
+  const q = searchQuery.toLowerCase();
+  return (
+    c.full_name.toLowerCase().includes(q) ||
+    (c.item_type && c.item_type.toLowerCase().includes(q)) ||
+    (c.cylinder_size && c.cylinder_size.toLowerCase().includes(q))
+  );
+});
 
-  // Pagination logic
-  const totalPages = Math.ceil(filteredCustomers.length / itemsPerPage);
+  // Group customers with same name/phone/address/item_type into single rows
+  const groupKey = (c) => `${c.full_name}||${c.phone}||${c.address}||${c.item_type}`;
+
+  const groupedFiltered = (() => {
+    const map = new Map();
+    for (const c of filteredCustomers) {
+      const k = groupKey(c);
+      if (!map.has(k)) {
+        map.set(k, {
+          key: k,
+          full_name: c.full_name,
+          phone: c.phone,
+          address: c.address,
+          category: c.category,
+          item_type: c.item_type,
+          created_by_name: c.created_by_name,
+          created_at: c.created_at,
+          entries: [],
+        });
+      }
+      map.get(k).entries.push({
+        id: c.id,
+        cylinder_size: c.cylinder_size,
+        quantity: c.quantity,
+        deposit_amount: c.deposit_amount,
+        deposit_date: c.deposit_date,
+        returned_date: c.returned_date,
+        created_by_name: c.created_by_name,
+        created_at: c.created_at,
+      });
+    }
+    return Array.from(map.values());
+  })();
+
+  // Pagination logic on grouped rows
+  const totalPages = Math.ceil(groupedFiltered.length / itemsPerPage);
   const activePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
   const startIdx = (activePage - 1) * itemsPerPage;
   const endIdx = startIdx + itemsPerPage;
-  const paginatedCustomers = filteredCustomers.slice(startIdx, endIdx);
+  const paginatedCustomers = groupedFiltered.slice(startIdx, endIdx);
+
+  const [expandedRows, setExpandedRows] = useState({});
+  const toggleExpand = (key) => setExpandedRows((p) => ({ ...p, [key]: !p[key] }));
   // Filter item types by selected category
   const filteredItemTypes = formData.category
     ? allItemTypes.filter(
@@ -454,17 +553,94 @@ const Customer = () => {
       )
     : [];
 
+  const CYLINDER_SIZES = ["Small", "Medium", "Large"];
+
+  const handleCylinderSizeChange = (size) => {
+    const current = parseSelectedSizes(formData.cylinder_size);
+    const updated = current.includes(size)
+      ? current.filter((s) => s !== size)
+      : [...current, size];
+    const ordered = CYLINDER_SIZES.filter((s) => updated.includes(s));
+
+    setFormData((prev) => {
+      const nextQuantities = { ...prev.size_quantities };
+      const nextAmounts = { ...prev.size_amounts };
+      if (!ordered.includes(size)) {
+        delete nextQuantities[size];
+        delete nextAmounts[size];
+      }
+      return {
+        ...prev,
+        cylinder_size: ordered.join(", "),
+        size_quantities: nextQuantities,
+        size_amounts: nextAmounts,
+      };
+    });
+  };
+
+  const handleSizeQuantityChange = (size, value) => {
+    setFormData((prev) => ({
+      ...prev,
+      size_quantities: {
+        ...prev.size_quantities,
+        [size]: value,
+      },
+    }));
+  };
+
+  const handleSizeAmountChange = (size, value) => {
+    setFormData((prev) => ({
+      ...prev,
+      size_amounts: {
+        ...prev.size_amounts,
+        [size]: value,
+      },
+    }));
+  };
+
+  const selectedSizes = parseSelectedSizes(formData.cylinder_size);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "category") {
-      setFormData((prev) => ({ ...prev, category: value, item_type: "" }));
+      setFormData((prev) => ({
+        ...prev,
+        category: value,
+        item_type: "",
+        cylinder_size: "",
+        size_quantities: {},
+        size_amounts: {},
+      }));
     } else {
-      setFormData((prev) => ({ ...prev, [name]: value }));
+      setFormData((prev) => {
+        const nextState = { ...prev, [name]: value };
+        const singleSelectedSize = parseSelectedSizes(prev.cylinder_size);
+
+        if (singleSelectedSize.length === 1) {
+          const [size] = singleSelectedSize;
+
+          if (name === "quantity") {
+            nextState.size_quantities = {
+              ...prev.size_quantities,
+              [size]: value,
+            };
+          }
+
+          if (name === "deposit_amount") {
+            nextState.size_amounts = {
+              ...prev.size_amounts,
+              [size]: value,
+            };
+          }
+        }
+
+        return nextState;
+      });
     }
   };
 
   const handleReset = () => {
-    setFormData(initialFormState);
+    setFormData(createInitialFormState());
     setEditingId(null);
     setShowForm(false);
   };
@@ -476,13 +652,61 @@ const Customer = () => {
       return;
     }
     const token = localStorage.getItem("access");
+
     const payload = {
-      ...formData,
+      full_name: formData.full_name.trim(),
+      phone: formData.phone,
+      address: formData.address.trim(),
+      category: formData.category,
+      item_type: formData.item_type,
       returned_date: formData.returned_date || null,
-      quantity: Number(formData.quantity),
-      deposit_amount: Number(formData.deposit_amount),
-      category: Number(formData.category),
+      deposit_amount: roundCurrency(
+        selectedSizes.length > 1
+          ? selectedSizes.reduce(
+              (sum, size) => sum + toSafeNumber(formData.size_amounts?.[size]),
+              0
+            )
+          : toSafeNumber(formData.deposit_amount)
+      ),
+      deposit_date: formData.deposit_date,
     };
+
+    if (editingId) {
+      if (selectedSizes.length !== 1) {
+        alert("Please edit one cylinder size record at a time.");
+        return;
+      }
+      payload.cylinder_size = selectedSizes[0] || formData.cylinder_size;
+      payload.quantity = Number(formData.quantity || 0);
+      payload.deposit_amount = roundCurrency(toSafeNumber(formData.deposit_amount));
+    } else if (formData.category === "cylinder" && selectedSizes.length === 0) {
+      alert("Please select at least one cylinder size before saving.");
+      return;
+    } else if (selectedSizes.length > 1) {
+      payload.size_quantities = [];
+      for (const size of selectedSizes) {
+        const quantity = Number(formData.size_quantities?.[size] || 0);
+        if (!quantity || quantity <= 0) {
+          alert(`Enter a valid quantity for ${size}`);
+          return;
+        }
+
+        const depositAmount = roundCurrency(toSafeNumber(formData.size_amounts?.[size]));
+        if (!depositAmount || depositAmount <= 0) {
+          alert(`Enter a valid deposit amount for ${size}`);
+          return;
+        }
+
+        payload.size_quantities.push({
+          cylinder_size: size,
+          quantity,
+          deposit_amount: depositAmount,
+        });
+      }
+    } else {
+      payload.cylinder_size = formData.cylinder_size;
+      payload.quantity = Number(formData.quantity);
+    }
 
     try {
       const url = editingId
@@ -526,6 +750,12 @@ const Customer = () => {
       item_type: customer.item_type,
       cylinder_size: customer.cylinder_size,
       quantity: customer.quantity,
+      size_quantities: {
+        [customer.cylinder_size]: customer.quantity,
+      },
+      size_amounts: {
+        [customer.cylinder_size]: customer.deposit_amount,
+      },
       deposit_amount: customer.deposit_amount,
       deposit_date: customer.deposit_date,
       returned_date: customer.returned_date || "",
@@ -557,8 +787,32 @@ const Customer = () => {
     }
   };
 
+  const handleDeleteAllCustomer = async (group) => {
+    if (!isAdmin) {
+      alert("Only admins can delete customer records.");
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to delete all records for ${group.full_name}? This will delete all ${group.entries.length} record(s) of this customer.`)) return;
+    try {
+      const token = localStorage.getItem("access");
+      const deletePromises = group.entries.map((entry) =>
+        fetch(`http://127.0.0.1:8000/api/customers/${entry.id}/`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      );
+      const responses = await Promise.all(deletePromises);
+      if (responses.every((res) => res.ok)) {
+        alert(`All records for ${group.full_name} deleted successfully`);
+        fetchCustomers();
+      } else {
+        alert("Failed to delete some records");
+      }
+    } catch (err) { console.error("DELETE ALL ERROR", err); }
+  };
+
   const getCategoryName = (id) =>
-    categoriesData.find((c) => c.id === Number(id))?.name || id;
+    categoriesData.find((c) => String(c.id) === String(id))?.name || id;
 
   const fmt = (d) => {
     try { return new Date(d).toLocaleDateString(); }
@@ -581,7 +835,7 @@ const Customer = () => {
       <input
         className="cr-search-input"
         type="text"
-        placeholder="Search by name..."
+        placeholder="Search by name, size or type..."
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
       />
@@ -602,11 +856,11 @@ const Customer = () => {
                     <th>Address</th>
                     <th>Category</th>
                     <th>Item Type</th>
-                    <th>Cyl. Size</th>
-                    <th>Qty</th>
-                    <th>Deposit</th>
-                    <th>Deposit Date</th>
-                    <th>Return Date</th>
+                    {/* <th>Cyl. Size</th> */}
+                    {/* <th>Qty</th> */}
+                    {/* <th>Deposit</th> */}
+                    {/* <th>Deposit Date</th> */}
+                    {/* <th>Return Date</th> */}
                     <th>Audit Trail</th>
                     <th>Actions</th>
                   </tr>
@@ -622,62 +876,113 @@ const Customer = () => {
     </td>
   </tr>
 ) : (
-  paginatedCustomers.map((c) => ( 
-                      <tr key={c.id}>
-                        <td><strong>{c.full_name}</strong></td>
-                        <td>{c.phone}</td>
-                        <td style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address}</td>
-                        <td>
-                          <span className="cr-badge cr-badge-cat">
-                            {getCategoryName(c.category)}
-                          </span>
-                        </td>
-                        <td>
-                          <span className="cr-badge cr-badge-type">
-                            {c.item_type}
-                          </span>
-                        </td>
-                        <td>{c.cylinder_size}</td>
-                        <td>{c.quantity}</td>
-                        <td><strong>{c.deposit_amount}</strong></td>
-                        <td>{fmt(c.deposit_date)}</td>
-                        <td>
-                          {c.returned_date ? (
-                            <span className="cr-badge cr-badge-returned">{fmt(c.returned_date)}</span>
-                          ) : (
-                            <span className="cr-badge cr-badge-pending">Pending</span>
-                          )}
-                        </td>
-                        <td>
-                          <div className="cr-audit">
-                            <span className="cr-audit-user">
-                              {c.created_by_name || "Not recorded"}
+                paginatedCustomers.map((group) => {
+                      const findCustomerById = (id) => customers.find((cc) => cc.id === id);
+                      return (
+                      <>
+                        <tr key={group.key}>
+                          <td>
+                            <button className="cr-action-btn" onClick={() => toggleExpand(group.key)} style={{ marginRight: 8 }}>
+                              {expandedRows[group.key] ? 'v' : '<'}
+                            </button>
+                            <strong>{group.full_name}</strong>
+                          </td>
+                          <td>{group.phone}</td>
+                          <td style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.address}</td>
+                          <td>
+                            <span className="cr-badge cr-badge-cat">
+                              {getCategoryName(group.category)}
                             </span>
-                            <span className="cr-audit-time">
-                              {formatAuditTimestamp(c.created_at)}
+                          </td>
+                          <td>
+                            <span className="cr-badge cr-badge-type">
+                              {group.item_type}
                             </span>
-                          </div>
-                        </td>
-                        <td>
-                          <button
-                            className="cr-action-btn cr-btn-edit"
-                            onClick={() => handleEdit(c)}
-                            title={isAdmin ? "Edit" : "Admin only"}
-                            disabled={!isAdmin}
-                          >
-                            <i className="bi bi-pencil-fill"></i> E
-                          </button>{" "}
-                          <button
-                            className="cr-action-btn cr-btn-delete"
-                            onClick={() => handleDelete(c.id)}
-                            title={isAdmin ? "Delete" : "Admin only"}
-                            disabled={!isAdmin}
-                          >
-                            <i className="bi bi-trash-fill"></i> D
-                          </button>
-                        </td>
-                      </tr>
-                    ))
+                          </td>
+                          {/* <td>{sizesSummary}</td> */}
+                          {/* <td>{totalQty}</td> */}
+                          {/* <td><strong>{totalDeposit}</strong></td> */}
+                          {/* <td>{group.entries[0]?.deposit_date ? fmt(group.entries[0].deposit_date) : '—'}</td> */}
+                          {/* <td>
+                            
+                              <span className="cr-badge cr-badge-pending">Pending</span>
+                          
+                          </td> */}
+                          <td>
+                            <div className="cr-audit">
+                              <span className="cr-audit-user">
+                                {group.created_by_name || "Not recorded"}
+                              </span>
+                              <span className="cr-audit-time">
+                                {formatAuditTimestamp(group.created_at)}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="cr-action-wrap">
+                              <button
+                                className="cr-action-btn cr-btn-delete"
+                                onClick={() => handleDeleteAllCustomer(group)}
+                                disabled={!isAdmin}
+                                title="Delete all records for this customer"
+                              >
+                                <i className="bi bi-trash-fill"></i> Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {expandedRows[group.key] && (
+                          <tr key={`${group.key}-details`}>
+                            <td colSpan="12" style={{ padding: 12 }}>
+                              <div style={{ background: '#f8f5f5', borderRadius: 8, padding: 8 }}>
+                                <table style={{ width: '100%', tableLayout: 'auto' }}>
+                                  <thead>
+                                    <tr style={{ borderBottom: '1px solid #fbfbfb' }}>
+                                      <th style={{ textAlign: 'left', padding: 6 }}>Size</th>
+                                      <th style={{ textAlign: 'left', padding: 6 }}>Qty</th>
+                                      <th style={{ textAlign: 'left', padding: 6 }}>Deposit</th>
+                                      <th style={{ textAlign: 'left', padding: 6 }}>Deposit Date</th>
+                                      <th style={{ textAlign: 'left', padding: 6 }}>Return Date</th>
+                                      <th style={{ textAlign: 'right', padding: 6 }}>Actions</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {group.entries.map((e) => (
+                                      <tr key={e.id} style={{ borderBottom: '1px solid #fafafa' }}>
+                                        <td style={{ padding: 6 }}>{e.cylinder_size}</td>
+                                        <td style={{ padding: 6 }}>{e.quantity}</td>
+                                        <td style={{ padding: 6 }}>{e.deposit_amount}</td>
+                                        <td style={{ padding: 6 }}>{e.deposit_date ? fmt(e.deposit_date) : '—'}</td>
+                                        <td style={{ padding: 6 }}>{e.returned_date ? fmt(e.returned_date) : 'Pending'}</td>
+                                        <td style={{ padding: 6, textAlign: 'right' }}>
+                                          <button
+                                            className="cr-action-btn cr-btn-edit"
+                                            onClick={() => handleEdit(findCustomerById(e.id))}
+                                            title={isAdmin ? "Edit" : "Admin only"}
+                                            disabled={!isAdmin}
+                                          >
+                                            <i className="bi bi-pencil-fill"></i> E
+                                          </button>{" "}
+                                          <button
+                                            className="cr-action-btn cr-btn-delete"
+                                            onClick={() => handleDelete(e.id)}
+                                            title={isAdmin ? "Delete" : "Admin only"}
+                                            disabled={!isAdmin}
+                                          >
+                                            <i className="bi bi-trash-fill"></i> D
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    );
+                })
                   )}
                 </tbody>
               </table>
@@ -847,30 +1152,99 @@ const Customer = () => {
 
                     <div className="cr-field">
                       <label className="cr-label">Cylinder Size *</label>
-                      <input
-                        className="cr-input"
-                        name="cylinder_size"
-                        placeholder="e.g. 47L"
-                        value={formData.cylinder_size}
-                        onChange={handleChange}
-                        required
-                      />
+                      {formData.category === "cylinder" ? (
+                        <div className="cr-checkbox-group">
+                          {CYLINDER_SIZES.map((size) => {
+                            const isChecked = selectedSizes.includes(size);
+                            return (
+                              <label
+                                key={size}
+                                className={`cr-checkbox-label${isChecked ? " checked" : ""}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => handleCylinderSizeChange(size)}
+                                />
+                                {size}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <input
+                          className="cr-input"
+                          name="cylinder_size"
+                          placeholder="e.g. 47L"
+                          value={formData.cylinder_size}
+                          onChange={handleChange}
+                          required
+                        />
+                      )}
                     </div>
                   </div>
 
                   <div className="cr-grid-2">
                     <div className="cr-field">
                       <label className="cr-label">Quantity *</label>
-                      <input
-                        type="number"
-                        className="cr-input"
-                        name="quantity"
-                        placeholder="0"
-                        min="1"
-                        value={formData.quantity}
-                        onChange={handleChange}
-                        required
-                      />
+                      {formData.category === "cylinder" && selectedSizes.length > 1 ? (
+                        <div style={{ display: "grid", gap: "0.75rem" }}>
+                          {selectedSizes.map((size) => (
+                            <div key={size} className="cr-field">
+                              <label className="cr-label">{size} Qty *</label>
+                              <input
+                                type="text"
+                                className="cr-input"
+                                min="0"
+                                value={formData.size_quantities?.[size] || ""}
+                                onChange={(e) => handleSizeQuantityChange(size, e.target.value)}
+                                required
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          className="cr-input"
+                          name="quantity"
+                          placeholder="0"
+                          min="1"
+                          value={formData.quantity}
+                          onChange={handleChange}
+                          required
+                        />
+                      )}
+                    </div>
+                    <div className="cr-field">
+                      <label className="cr-label">Deposit Amount *</label>
+                      {formData.category === "cylinder" && selectedSizes.length > 1 ? (
+                        <div style={{ display: "grid", gap: "0.75rem" }}>
+                          {selectedSizes.map((size) => (
+                            <div key={size} className="cr-field">
+                              <label className="cr-label">{size} Deposit *</label>
+                              <input
+                                type="text"
+                                className="cr-input"
+                                placeholder="NPR 0"
+                                value={formData.size_amounts?.[size] || ""}
+                                onChange={(e) => handleSizeAmountChange(size, e.target.value)}
+                                required
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <input
+                          type="text"
+                          className="cr-input"
+                          name="deposit_amount"
+                          placeholder="NPR 0"
+                          value={formData.deposit_amount}
+                          onChange={handleChange}
+                          required
+                        />
+                      )}
                     </div>
                   </div>
 
@@ -882,19 +1256,7 @@ const Customer = () => {
                     <span>Transaction Details</span>
                   </div>
 
-                  <div className="cr-grid-3">
-                    <div className="cr-field">
-                      <label className="cr-label">Deposit Amount *</label>
-                      <input
-                        type="text"
-                        className="cr-input"
-                        name="deposit_amount"
-                        placeholder="NPR 0"
-                        value={formData.deposit_amount}
-                        onChange={handleChange}
-                        required
-                      />
-                    </div>
+                  <div className="cr-grid-2">
                     <div className="cr-field">
                       <label className="cr-label">Deposit Date *</label>
                       <input

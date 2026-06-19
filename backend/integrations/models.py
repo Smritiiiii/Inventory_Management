@@ -13,9 +13,6 @@ class UserProfile(models.Model):
         return f"{self.user.username} - {role}"
 
 
-class Category(models.Model):
-    name = models.CharField(max_length=100, unique=True)
-
 class ItemType(models.Model):
     CATEGORY_CHOICES = [
         ("cylinder", "Cylinder"),
@@ -32,12 +29,16 @@ class ItemType(models.Model):
         unique_together = ('category', 'name')
 
 class Supplier(models.Model):
+    CATEGORY_CHOICES = [
+        ("cylinder", "Cylinder"),
+        ("accessory", "Accessory"),
+    ]
+    
     supplier_name = models.CharField(max_length=150)
 
-    category = models.ForeignKey(
-        Category,
-        on_delete=models.CASCADE,
-        related_name="supplier_records"
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES
     )
 
     item_type = models.CharField(max_length=100)
@@ -60,14 +61,18 @@ class Supplier(models.Model):
 
 
 class Customer(models.Model):
+    CATEGORY_CHOICES = [
+        ("cylinder", "Cylinder"),
+        ("accessory", "Accessory"),
+    ]
+    
     full_name = models.CharField(max_length=100)
     phone = models.CharField(max_length=15)
     address = models.TextField()
 
-    category = models.ForeignKey(
-        Category,
-        on_delete=models.CASCADE,
-        related_name="customers"
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES
     )
 
     item_type = models.CharField(max_length=100)
@@ -143,7 +148,15 @@ class DailySale(models.Model):
 
 class CylinderInventory(models.Model):
     """Tracks current filled and empty cylinder stock"""
-    category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name="cylinder_inventories")
+    CATEGORY_CHOICES = [
+        ("cylinder", "Cylinder"),
+        ("accessory", "Accessory"),
+    ]
+    
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES
+    )
     item_type = models.CharField(max_length=100)
     cylinder_size = models.CharField(max_length=50)
     
@@ -165,6 +178,11 @@ class CylinderInventory(models.Model):
 
 class CylinderTransaction(models.Model):
     """Log all cylinder movements for audit trail"""
+    CATEGORY_CHOICES = [
+        ("cylinder", "Cylinder"),
+        ("accessory", "Accessory"),
+    ]
+    
     TRANSACTION_TYPE_CHOICES = (
         ("received_filled", "Received Filled from Supplier"),
         ("given_to_customer", "Given Filled to Customer"),
@@ -174,7 +192,10 @@ class CylinderTransaction(models.Model):
         ("stock_adjustment", "Stock Adjustment"),
     )
     
-    category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name="cylinder_transactions")
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES
+    )
     item_type = models.CharField(max_length=100)
     cylinder_size = models.CharField(max_length=50)
     

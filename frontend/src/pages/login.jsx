@@ -287,6 +287,11 @@ export default function Login() {
     }
 
     try {
+      // Clear old tokens before login
+      localStorage.removeItem("access");
+      localStorage.removeItem("refresh");
+      localStorage.removeItem("user");
+
       const res = await api.post("/auth/login/", { username, password });
       localStorage.setItem("access", res.data.access);
       localStorage.setItem("refresh", res.data.refresh);
@@ -324,6 +329,11 @@ export default function Login() {
     }
 
     try {
+      // Clear old tokens before register
+      localStorage.removeItem("access");
+      localStorage.removeItem("refresh");
+      localStorage.removeItem("user");
+
       const res = await api.post("/auth/register/", {
         username: regUsername,
         email: regEmail,

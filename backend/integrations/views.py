@@ -5,159 +5,19 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
 from django.http import HttpResponse
+from django.contrib.auth import authenticate
+import json
 from datetime import timedelta, datetime
 from django.db import transaction
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
 from .permissions import IsAdminOrCreateOnly, IsAdminCanDeleteOnly
 
-try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    OPENPYXL_AVAILABLE = True
-except ImportError:
-    OPENPYXL_AVAILABLE = False
-
-SIZE_ORDER = {"Small": 0, "Medium": 1, "Large": 2}
-
-
-def _clean_text(value):
-    return " ".join(str(value or "").split()).strip()
-
-
-def _normalize_size(size_value):
-    cleaned = _clean_text(size_value)
-    if not cleaned:
-        return "Unspecified"
-
-    lowered = cleaned.casefold()
-    if lowered in {"small", "medium", "large"}:
-        return lowered.title()
-
-    return cleaned.title()
-
-
-def _split_sizes(size_value):
-    cleaned = _clean_text(size_value)
-    if not cleaned:
-        return ["Unspecified"]
-
-    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
-    if not parts:
-        parts = [cleaned]
-
-    return [_normalize_size(part) for part in parts]
-
-
-def _normalize_item_type(item_type):
-    cleaned = _clean_text(item_type)
-    return cleaned or "Unknown"
-
-
-def _allocate_quantity(quantity, sizes):
-    sizes = sizes or ["Unspecified"]
-    total_quantity = max(0, int(quantity or 0))
-    base_quantity = total_quantity // len(sizes)
-    remainder = total_quantity % len(sizes)
-
-    allocations = []
-    for index, size in enumerate(sizes):
-        allocations.append((size, base_quantity + (1 if index < remainder else 0)))
-
-    return allocations
-
 
 def _build_inventory_summary():
-    rows = {}
-
-    def get_row(item_type, cylinder_size):
-        normalized_item_type = _normalize_item_type(item_type)
-        normalized_size = _normalize_size(cylinder_size)
-        key = (normalized_item_type.casefold(), normalized_size.casefold())
-
-        if key not in rows:
-            rows[key] = {
-                "id": f"{key[0]}::{key[1]}",
-                "item_type": normalized_item_type,
-                "cylinder_size": normalized_size,
-                "supplier_received": 0,
-                "received_filled_quantity": 0,
-                "received_refilled_quantity": 0,
-                "stock_adjustment_quantity": 0,
-                "customer_open_quantity": 0,
-                "customer_returned_quantity": 0,
-                "unmatched_sales_quantity": 0,
-                "given_to_customer_quantity": 0,
-                "received_empty_quantity": 0,
-                "sent_for_refill_quantity": 0,
-            }
-
-        return rows[key]
-
-    suppliers = Supplier.objects.exclude(
-        category__iexact="accessory"
-    )
-    for supplier in suppliers:
-        for size, quantity in _allocate_quantity(
-            supplier.quantity_received,
-            _split_sizes(supplier.cylinder_size),
-        ):
-            get_row(supplier.item_type, size)["supplier_received"] += quantity
-
-    customers = list(
-        Customer.objects.exclude(category__iexact="accessory")
-    )
-    customer_lookup = {customer.id: customer for customer in customers}
-
-    for customer in customers:
-        for size, quantity in _allocate_quantity(
-            customer.quantity,
-            _split_sizes(customer.cylinder_size),
-        ):
-            row = get_row(customer.item_type, size)
-            if customer.returned_date:
-                row["customer_returned_quantity"] += quantity
-            else:
-                row["customer_open_quantity"] += quantity
-
-    sales = DailySale.objects.filter(sale_type="cylinder")
-    for sale in sales:
-        # Customer records are treated as the source of truth for the
-        # customer's current cylinder position. We only subtract sales that
-        # are not tied to an existing customer record.
-        if sale.customer_id and sale.customer_id in customer_lookup:
-            continue
-
-        for size, quantity in _allocate_quantity(
-            sale.quantity,
-            _split_sizes(sale.cylinder_size),
-        ):
-            get_row(sale.item_type, size)["unmatched_sales_quantity"] += quantity
-
-    transactions = CylinderTransaction.objects.exclude(
-        category__iexact="accessory"
-    )
-    for transaction_record in transactions:
-        for size, quantity in _allocate_quantity(
-            transaction_record.quantity,
-            _split_sizes(transaction_record.cylinder_size),
-        ):
-            row = get_row(transaction_record.item_type, size)
-            if transaction_record.transaction_type == "received_filled":
-                row["received_filled_quantity"] += quantity
-            elif transaction_record.transaction_type == "given_to_customer":
-                row["given_to_customer_quantity"] += quantity
-            elif transaction_record.transaction_type == "received_empty":
-                row["received_empty_quantity"] += quantity
-            elif transaction_record.transaction_type == "sent_for_refill":
-                row["sent_for_refill_quantity"] += quantity
-            elif transaction_record.transaction_type == "received_refilled":
-                row["received_refilled_quantity"] += quantity
-            elif transaction_record.transaction_type == "stock_adjustment":
-                row["stock_adjustment_quantity"] += quantity
-
-    breakdown = []
     totals = {
         "total_received_from_supplier": 0,
         "total_given_to_customers": 0,
@@ -165,71 +25,113 @@ def _build_inventory_summary():
         "total_sent_to_supplier": 0,
         "total_empty_in_stock": 0,
         "total_full_in_stock": 0,
+        "breakdown": [],
     }
 
-    for row in rows.values():
-        total_received_from_supplier = (
-            row["supplier_received"] + row["received_filled_quantity"]
-        )
-        total_given_to_customers = (
-            row["customer_open_quantity"]
-            + row["customer_returned_quantity"]
-            + row["unmatched_sales_quantity"]
-            + row["given_to_customer_quantity"]
-        )
-        total_returned_from_customers = max(
-            row["customer_returned_quantity"],
-            row["received_empty_quantity"],
-        )
+    supplier_received = Supplier.objects.filter(
+        category__iexact="cylinder"
+    ).aggregate(total=Coalesce(Sum("quantity_received"), 0))["total"]
 
-        full_in_stock = max(
-            0,
-            row["supplier_received"]
-            + row["received_filled_quantity"]
-            + row["received_refilled_quantity"]
-            + row["stock_adjustment_quantity"]
-            - row["customer_open_quantity"]
-            - row["unmatched_sales_quantity"]
-            - row["given_to_customer_quantity"],
-        )
-        empty_in_stock = max(
-            0,
-            total_returned_from_customers - row["sent_for_refill_quantity"],
-        )
-        in_refill_quantity = max(
-            0,
-            row["sent_for_refill_quantity"] - row["received_refilled_quantity"],
-        )
-        total_in_stock = full_in_stock + empty_in_stock
+    refilled_received = CylinderTransaction.objects.filter(
+        category__iexact="cylinder",
+        transaction_type__in=["received_refilled", "received_filled"],
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
-        totals["total_received_from_supplier"] += total_received_from_supplier
-        totals["total_given_to_customers"] += total_given_to_customers
-        totals["total_returned_from_customers"] += total_returned_from_customers
-        totals["total_sent_to_supplier"] += row["sent_for_refill_quantity"]
-        totals["total_empty_in_stock"] += empty_in_stock
-        totals["total_full_in_stock"] += full_in_stock
+    totals["total_received_from_supplier"] = supplier_received + refilled_received
 
-        breakdown.append(
-            {
-                "id": row["id"],
-                "item_type": row["item_type"],
-                "cylinder_size": row["cylinder_size"],
-                "full_in_stock": full_in_stock,
-                "empty_in_stock": empty_in_stock,
-                "in_refill_quantity": in_refill_quantity,
-                "total_in_stock": total_in_stock,
-            }
-        )
+    customer_sales = Customer.objects.filter(
+        category__iexact="cylinder",
+        returned_date__isnull=True,
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
-    breakdown.sort(
-        key=lambda item: (
-            item["item_type"].casefold(),
-            SIZE_ORDER.get(item["cylinder_size"], 99),
-            item["cylinder_size"].casefold(),
-        )
+    daily_sales = DailySale.objects.filter(
+        category__iexact="cylinder",
+        refill=True,
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
+
+    empty_from_transactions = CylinderTransaction.objects.filter(
+        category__iexact="cylinder",
+        transaction_type="received_empty"
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
+
+    returned_from_customers = Customer.objects.filter(
+        category__iexact="cylinder",
+        returned_date__isnull=False
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
+
+    totals["total_empty_in_stock"] = empty_from_transactions + returned_from_customers
+
+    totals["total_given_to_customers"] = max(
+        0,
+        customer_sales - empty_from_transactions,
     )
 
+    totals["total_sent_to_supplier"] = CylinderTransaction.objects.filter(
+        category__iexact="cylinder",
+        transaction_type="sent_for_refill",
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
+
+    totals["total_empty_in_stock"] = CylinderTransaction.objects.filter(
+        category__iexact="cylinder",
+        transaction_type="received_empty"
+    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
+
+    totals["total_full_in_stock"] = supplier_received + refilled_received - totals["total_given_to_customers"] - totals["total_empty_in_stock"]
+    totals["total_returned_from_customers"] = empty_from_transactions + returned_from_customers
+
+    breakdown_map = {}
+
+    # Step 1: Add quantities received from suppliers per item_type + cylinder_size
+    for row in Supplier.objects.filter(category__iexact="cylinder").values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity_received"), 0)):
+        key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
+        breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
+        breakdown_map[key]["received"] += row["total"]
+
+    # Step 2: Add refilled/received_filled from CylinderTransaction per item_type + cylinder_size
+    for row in CylinderTransaction.objects.filter(
+        category__iexact="cylinder",
+        transaction_type__in=["received_refilled", "received_filled"]
+    ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
+        key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
+        breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
+        breakdown_map[key]["refilled"] += row["total"]
+
+    # Step 3: Add all customer quantities given out per item_type + cylinder_size
+    for row in Customer.objects.filter(category__iexact="cylinder").values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
+        key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
+        breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
+        breakdown_map[key]["given"] += row["total"]
+
+    # Step 4: Add back returned quantities per item_type + cylinder_size
+    for row in Customer.objects.filter(
+        category__iexact="cylinder",
+        returned_date__isnull=False
+    ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
+        key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
+        breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
+        breakdown_map[key]["returned"] += row["total"]
+
+    # Step 5: Also subtract daily_sales per item_type + cylinder_size
+    for row in DailySale.objects.filter(
+        category__iexact="cylinder",
+        refill=True
+    ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
+        key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
+        breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
+        breakdown_map[key]["given"] += row["total"]
+
+    # Build final breakdown list
+    breakdown = []
+    for (item_type, cylinder_size), values in sorted(breakdown_map.items()):
+        full_in_stock = max(0, values["received"] + values["refilled"] - values["given"] + values["returned"])
+        breakdown.append({
+            "item_type": item_type,
+            "cylinder_size": cylinder_size,
+            "full_in_stock": full_in_stock,
+        })
+
     totals["breakdown"] = breakdown
+
     return totals
 
 
@@ -271,7 +173,7 @@ class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
     
     def post(self, request):
-        from django.contrib.auth import authenticate
+      
         
         username = request.data.get('username')
         password = request.data.get('password')
@@ -321,12 +223,8 @@ class CurrentUserView(APIView):
         })
 
 
-# ==================== Category & Item ViewSets ====================
+# ==================== Item ViewSets ====================
 
-class CategoryViewSet(viewsets.ModelViewSet):
-    queryset = Category.objects.all().order_by("name")
-    serializer_class = CategorySerializer
-    permission_classes = [permissions.IsAuthenticated]
 
 class ItemTypeViewSet(viewsets.ModelViewSet):
     queryset = ItemType.objects.select_related("created_by").all().order_by("id")
@@ -347,15 +245,102 @@ class ItemTypeViewSet(viewsets.ModelViewSet):
 
 
 class SupplierViewSet(viewsets.ModelViewSet):
-    queryset = Supplier.objects.select_related("category", "created_by").order_by("-created_at")
+    queryset = Supplier.objects.select_related("created_by").order_by("-created_at")
     serializer_class = SupplierSerializer
     permission_classes = [IsAdminOrCreateOnly]
+
+    def create(self, request, *args, **kwargs):
+        raw_size_quantities = request.data.get("size_quantities") or request.data.get("sizeQuantities")
+        if raw_size_quantities:
+            try:
+                if isinstance(raw_size_quantities, str):
+                    raw_size_quantities = json.loads(raw_size_quantities)
+            except (ValueError, TypeError):
+                raise ValidationError({"size_quantities": "Invalid JSON for size_quantities."})
+
+            if isinstance(raw_size_quantities, list):
+                entries = raw_size_quantities
+            elif isinstance(raw_size_quantities, dict):
+                entries = [
+                    {"cylinder_size": size, "quantity": quantity}
+                    for size, quantity in raw_size_quantities.items()
+                ]
+            else:
+                raise ValidationError(
+                    {"size_quantities": "Expected a list or object of size quantities."}
+                )
+
+            created = []
+            with transaction.atomic():
+                for i, entry in enumerate(entries):
+                    cylinder_size = entry.get("cylinder_size")
+                    new_quantity = int(entry.get("quantity") or 0)
+                    date_received = request.data.get("date_received")
+
+                    entry_total_amount = float(
+                        entry.get("total_amount") or entry.get("totalAmount") or 0
+                    )
+
+                    # None means "user left it blank" vs 0 meaning "user typed 0"
+                    new_amount_paid_raw = request.data.get("amount_paid")
+                    new_amount_paid = (
+                        float(new_amount_paid_raw)
+                        if new_amount_paid_raw not in (None, "", 0, "0")
+                        else None
+                    )
+
+                    # Check if a record with the same key + same date already exists
+                    existing = Supplier.objects.filter(
+                        supplier_name=request.data.get("supplier_name"),
+                        category=request.data.get("category"),
+                        item_type=request.data.get("item_type"),
+                        cylinder_size=cylinder_size,
+                        date_received=date_received,
+                    ).first()
+
+                    if existing:
+                        # ── MERGE into existing record ──
+                        old_total = float(existing.total_amount or 0)
+                        old_paid = float(existing.amount_paid or 0)
+
+                        existing.quantity_received += new_quantity
+                        existing.total_amount = old_total + entry_total_amount
+
+                        # Only add to amount_paid if user explicitly sent a value
+                        if new_amount_paid is not None and i == 0:
+                            existing.amount_paid = old_paid + new_amount_paid
+                        # else: leave amount_paid untouched
+
+                        existing.save()  # signal fires here and updates inventory correctly
+                        created.append(SupplierSerializer(existing).data)
+
+                    else:
+                        # ── CREATE new record ──
+                        data = request.data.copy()
+                        data.pop("size_quantities", None)
+                        data.pop("sizeQuantities", None)
+                        data["cylinder_size"] = cylinder_size
+                        data["quantity_received"] = new_quantity
+                        data["total_amount"] = entry_total_amount
+                        data["amount_paid"] = (new_amount_paid if new_amount_paid is not None else 0) if i == 0 else 0
+
+                        serializer = self.get_serializer(data=data)
+                        serializer.is_valid(raise_exception=True)
+                        serializer.save(created_by=request.user)
+                        created.append(serializer.data)
+
+            return Response(created, status=status.HTTP_201_CREATED)
+
+        # ── single entry fallback (no size_quantities) ──
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(created_by=request.user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
     
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
-    
+
     def destroy(self, request, *args, **kwargs):
-        """Override destroy to prevent employees from deleting"""
         if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
             return Response(
                 {'detail': 'Employees cannot delete records.'},
@@ -363,15 +348,182 @@ class SupplierViewSet(viewsets.ModelViewSet):
             )
         return super().destroy(request, *args, **kwargs)
 
-
 class CustomerViewSet(viewsets.ModelViewSet):
-    queryset = Customer.objects.select_related("category", "created_by").order_by("-created_at")
+    queryset = Customer.objects.select_related("created_by").order_by("-created_at")
     serializer_class = CustomerSerializer
     permission_classes = [IsAdminOrCreateOnly]
     
+    def _validate_cylinder_sale(self, category, item_type, cylinder_size, quantity):
+        if category != "cylinder":
+            return
+
+        cylinder_inventory = CylinderInventory.objects.select_for_update().filter(
+            category=category,
+            item_type=item_type,
+            cylinder_size=cylinder_size,
+        ).first()
+
+        if not cylinder_inventory or cylinder_inventory.filled_quantity < quantity:
+            available = cylinder_inventory.filled_quantity if cylinder_inventory else 0
+            raise ValidationError(
+                {
+                    "quantity": (
+                        f'Only {available} {item_type} {cylinder_size} cylinder(s) are '
+                        f'available in stock. Requested: {quantity}'
+                    )
+                }
+            )
+
+        cylinder_inventory.filled_quantity -= quantity
+        cylinder_inventory.save(update_fields=["filled_quantity"])
+
+    def _restore_cylinder_inventory(self, category, item_type, cylinder_size, quantity):
+        if category != "cylinder":
+            return
+
+        cylinder_inventory = CylinderInventory.objects.select_for_update().filter(
+            category=category,
+            item_type=item_type,
+            cylinder_size=cylinder_size,
+        ).first()
+
+        if cylinder_inventory:
+            cylinder_inventory.filled_quantity += quantity
+            cylinder_inventory.save(update_fields=["filled_quantity"])
+
+    def create(self, request, *args, **kwargs):
+        raw_size_quantities = request.data.get("size_quantities") or request.data.get("sizeQuantities")
+        if raw_size_quantities:   
+            try:
+                if isinstance(raw_size_quantities, str):
+                    raw_size_quantities = json.loads(raw_size_quantities)
+            except (ValueError, TypeError):
+                raise ValidationError({"size_quantities": "Invalid JSON for size_quantities."})
+
+            if isinstance(raw_size_quantities, list):
+                entries = raw_size_quantities
+            elif isinstance(raw_size_quantities, dict):
+                entries = [
+                    {"cylinder_size": size, "quantity": quantity}
+                    for size, quantity in raw_size_quantities.items()
+                ]
+            else:
+                raise ValidationError(
+                    {"size_quantities": "Expected a list or object of size quantities."}
+                )
+            created = []
+            with transaction.atomic():
+                for entry in entries:
+                    cylinder_size = entry.get("cylinder_size")
+                    new_quantity = int(entry.get("quantity") or 0)
+                    deposit_amount = float(entry.get("deposit_amount") or entry.get("depositAmount") or 0)
+                    deposit_date = request.data.get("deposit_date")
+
+                    existing = Customer.objects.filter(
+                        full_name=request.data.get("full_name"),
+                        phone=request.data.get("phone"),
+                        item_type=request.data.get("item_type"),
+                        cylinder_size=cylinder_size,
+                        deposit_date=deposit_date,
+                    ).first()
+
+
+                    if existing:
+                        existing.quantity += new_quantity
+                        existing.deposit_amount = float(existing.deposit_amount or 0) + deposit_amount
+                        existing.save()
+                        created.append(CustomerSerializer(existing).data)
+                    else:
+                        data = dict(request.data)
+                        data.pop("size_quantities", None)
+                        data.pop("sizeQuantities", None)
+                        data["cylinder_size"] = cylinder_size
+                        data["quantity"] = new_quantity
+                        if deposit_amount:
+                            data["deposit_amount"] = deposit_amount
+
+                        serializer = self.get_serializer(data=data)
+                        serializer.is_valid(raise_exception=True)
+                        validated = serializer.validated_data
+                        if validated.get("category") == "cylinder":
+                            self._validate_cylinder_sale(
+                                validated.get("category"),
+                                validated.get("item_type"),
+                                validated.get("cylinder_size"),
+                                validated.get("quantity") or 0,
+                            )
+                        serializer.save(created_by=request.user)
+                        created.append(serializer.data)
+
+            return Response(created, status=status.HTTP_201_CREATED)
+
+        # ── single entry fallback ──
+        existing = Customer.objects.filter(
+            full_name=request.data.get("full_name"),
+            phone=request.data.get("phone"),
+            item_type=request.data.get("item_type"),
+            cylinder_size=request.data.get("cylinder_size"),
+            deposit_date=request.data.get("deposit_date"),
+        ).first()
+          
+        if existing:
+            existing.quantity += int(request.data.get("quantity") or 0)
+            existing.deposit_amount = float(existing.deposit_amount or 0) + float(request.data.get("deposit_amount") or 0)
+            existing.save()
+            return Response(CustomerSerializer(existing).data, status=status.HTTP_200_OK)  # ← fixed: use CustomerSerializer, not `created`
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            validated_data = serializer.validated_data
+            if validated_data.get("category") == "cylinder":
+                self._validate_cylinder_sale(
+                    validated_data.get("category"),
+                    validated_data.get("item_type"),
+                    validated_data.get("cylinder_size"),
+                    validated_data.get("quantity") or 0,
+                )
+            self.perform_create(serializer)
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
-    
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            if instance.category == "cylinder":
+                self._restore_cylinder_inventory(
+                    instance.category,
+                    instance.item_type,
+                    instance.cylinder_size,
+                    instance.quantity or 0,
+                )
+
+            new_category = serializer.validated_data.get("category", instance.category)
+            new_item_type = serializer.validated_data.get("item_type", instance.item_type)
+            new_cylinder_size = serializer.validated_data.get("cylinder_size", instance.cylinder_size)
+            new_quantity = serializer.validated_data.get("quantity", instance.quantity) or 0
+
+            if new_category == "cylinder":
+                self._validate_cylinder_sale(
+                    new_category,
+                    new_item_type,
+                    new_cylinder_size,
+                    new_quantity,
+                )
+
+            self.perform_update(serializer)
+
+        return Response(serializer.data)
+
     def destroy(self, request, *args, **kwargs):
         """Override destroy to prevent employees from deleting"""
         if not (hasattr(request.user, 'profile') and request.user.profile.is_admin):
@@ -379,7 +531,20 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 {'detail': 'Employees cannot delete records.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        return super().destroy(request, *args, **kwargs)
+
+        instance = self.get_object()
+
+        with transaction.atomic():
+            if instance.category == "cylinder":
+                self._restore_cylinder_inventory(
+                    instance.category,
+                    instance.item_type,
+                    instance.cylinder_size,
+                    instance.quantity or 0,
+                )
+            self.perform_destroy(instance)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DailySaleViewSet(viewsets.ModelViewSet):
@@ -574,19 +739,9 @@ class DailySaleViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class CylinderInventoryViewSet(viewsets.ModelViewSet):
-    queryset = CylinderInventory.objects.select_related('category').all()
-    serializer_class = CylinderInventorySerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['item_type', 'cylinder_size']
-    ordering_fields = ['updated_at']
-    ordering = ['-updated_at']
-
-
 class CylinderTransactionViewSet(viewsets.ModelViewSet):
     queryset = CylinderTransaction.objects.select_related(
-        'category', 'supplier', 'customer', 'created_by'
+        'supplier', 'customer', 'created_by'
     ).all()
     serializer_class = CylinderTransactionSerializer
     permission_classes = [IsAdminOrCreateOnly]

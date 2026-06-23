@@ -548,12 +548,8 @@ const CylinderTracking = () => {
   const [suppliers, setSuppliers] = useState([]);
   const [editingId, setEditingId] = useState(null);
   const isAdmin = isCurrentUserAdmin();
-
-  // Which of the two transaction modes is active in the log form
-  // "sent_for_refill" | "received_empty"
+  const [allItemTypes, setAllItemTypes] = useState([]);
   const [logMode, setLogMode] = useState("sent_for_refill");
-
-  // Sent for refill: qty/notes/date keyed by supplier row id
   const [refillRows, setRefillRows] = useState({});
 
   // Received empty: selected customer (by name+phone) and qty/notes/date keyed by that customer's row ids
@@ -590,6 +586,10 @@ const CylinderTracking = () => {
     fetchAllPages("/api/suppliers/")
       .then(setSuppliers)
       .catch((err) => console.error("Suppliers fetch error", err));
+
+      fetchAllPages("/api/item-types/")
+      .then(setAllItemTypes)
+      .catch((err)=>console.error("Item types fetch error", err));
   }, []);
 
   const filteredTransactions = allTransactions.filter((transactionRecord) => {
@@ -676,6 +676,13 @@ const CylinderTracking = () => {
   };
 
   // ---------- Submit ----------
+  // Resolve category id from item_type name via allItemTypes
+  const getCategoryByItemTypeName = (itemTypeName) => {
+    const match = allItemTypes.find(
+      (it) => it.name.toLowerCase() === itemTypeName.toLowerCase()
+    );
+    return match ? match.category : null;
+  };
 
   const postTransaction = async (token, payload) => {
     const res = await fetch("http://127.0.0.1:8000/api/cylinder-transactions/", {
@@ -686,6 +693,11 @@ const CylinderTracking = () => {
       },
       body: JSON.stringify(payload),
     });
+     if (!res.ok) {
+      const errorData = await res.json();
+      console.error("API error:", errorData);
+      alert("Failed: " + JSON.stringify(errorData));
+    }
     return res.ok;
   };
 
@@ -706,6 +718,7 @@ const CylinderTracking = () => {
       let allOk = true;
       for (const { supplier, row } of rowsToSubmit) {
         const payload = {
+          category: getCategoryByItemTypeName(supplier.item_type),
           item_type: supplier.item_type,
           cylinder_size: supplier.cylinder_size,
           transaction_type: "sent_for_refill",
@@ -758,6 +771,7 @@ const CylinderTracking = () => {
       let allOk = true;
       for (const { custRow, row } of rowsToSubmit) {
         const payload = {
+          category: getCategoryByItemTypeName(custRow.item_type),
           item_type: custRow.item_type,
           cylinder_size: custRow.cylinder_size,
           transaction_type: "received_empty",

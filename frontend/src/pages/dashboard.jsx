@@ -126,6 +126,13 @@ const styles = `
     border-bottom: 1px solid #f0ede6;
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: .6rem;
+    flex-wrap: wrap;
+  }
+  .db-card-head-left {
+    display: flex;
+    align-items: center;
     gap: .6rem;
   }
   .db-card-head-icon {
@@ -141,6 +148,61 @@ const styles = `
     font-size: 1rem;
     margin: 0;
     letter-spacing: -.01em;
+  }
+
+  /* ── filter group ── */
+  .db-filter-group {
+    display: flex;
+    background: transparent;
+    border-radius: 50px;
+    padding: 0;
+    box-shadow: none;
+    gap: 4px;
+    align-items: center;
+  }
+  .db-filter-btn {
+    padding: .35rem .85rem;
+    border-radius: 50px;
+    border: 1.5px solid #e8e3da;
+    background: transparent;
+    font-family: 'DM Sans', sans-serif;
+    font-size: .78rem;
+    font-weight: 500;
+    color: #777;
+    cursor: pointer;
+    transition: background .2s, color .2s, border-color .2s;
+    white-space: nowrap;
+  }
+  .db-filter-btn:hover {
+    border-color: #c0392b;
+    color: #c0392b;
+  }
+  .db-filter-btn.active {
+    background: #1a1a1a;
+    color: #f4f1eb;
+    border-color: #1a1a1a;
+  }
+
+  .db-month-picker {
+    padding: .35rem .75rem;
+    border-radius: 50px;
+    border: 1.5px solid #e8e3da;
+    background: #fff;
+    font-family: 'DM Sans', sans-serif;
+    font-size: .78rem;
+    font-weight: 500;
+    color: #555;
+    cursor: pointer;
+    outline: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    transition: border-color .2s;
+  }
+  .db-month-picker:focus { border-color: #c0392b; }
+  .db-month-picker.active {
+    border-color: #1a1a1a;
+    background: #fff;
+    color: #1a1a1a;
+    font-weight: 600;
   }
 
   /* ── stock flow ── */
@@ -354,9 +416,18 @@ const styles = `
   @keyframes db-spin { to { transform: rotate(360deg); } }
 `;
 
+/* ── helpers ── */
+const toYearMonth = (date) => {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+};
+
 export default function Dashboard() {
   const sizeOrder = { Small: 0, Medium: 1, Large: 2 };
   const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState("all");
+  const [selectedMonth, setSelectedMonth] = useState(toYearMonth(new Date()));
   const [stats, setStats] = useState({
     totalCustomers: 0,
     totalSuppliers: 0,
@@ -375,15 +446,21 @@ export default function Dashboard() {
   const [inventoryBreakdown, setInventoryBreakdown] = useState([]);
   const [accessories, setAccessories] = useState([]);
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => { fetchData(); }, [timeRange, selectedMonth]);
 
   const fetchData = async () => {
     try {
       setLoading(true);
+      // Build query params for inventory summary
+      let invUrl = "/api/cylinder-transactions/current_inventory_summary/?time_range=" + timeRange;
+      if (timeRange === "pick_month") {
+        invUrl += "&month=" + selectedMonth;
+      }
+      
       const [suppliers, customers, invRes, allItems] = await Promise.all([
         fetchAllPages("/api/suppliers/"),
         fetchAllPages("/api/customers/"),
-        api.get("/api/cylinder-transactions/current_inventory_summary/"),
+        api.get(invUrl),
         fetchAllPages("/api/item-types/"),
       ]);
 
@@ -416,12 +493,6 @@ export default function Dashboard() {
   };
 
 const inventoryBreakdownRows = inventoryBreakdown
-  .filter((item) => {
-    const filled = item.full_in_stock || 0;
-    const empty = item.empty_in_stock || 0;
-    const inRefill = item.in_refill_quantity || 0;
-    return filled + empty + inRefill > 0;  // ← this is fine, keep as is
-  })
   .map((item) => ({
     ...item,
     item_type: item.item_type || "",
@@ -497,8 +568,44 @@ const inventoryBreakdownRows = inventoryBreakdown
           {/* current inventory */}
           <div className="db-card">
             <div className="db-card-head">
-              <div className="db-card-head-icon"><i className="bi bi-box-seam-fill"></i></div>
-              <h3>Current Inventory</h3>
+              <div className="db-card-head-left">
+                <div className="db-card-head-icon"><i className="bi bi-box-seam-fill"></i></div>
+                <h3>Current Inventory</h3>
+              </div>
+              <div className="db-filter-group">
+                <button 
+                  className={`db-filter-btn ${timeRange === 'today' ? 'active' : ''}`}
+                  onClick={() => setTimeRange('today')}
+                >
+                  Today
+                </button>
+                <button 
+                  className={`db-filter-btn ${timeRange === 'this_month' ? 'active' : ''}`}
+                  onClick={() => setTimeRange('this_month')}
+                >
+                  This Month
+                </button>
+                <button 
+                  className={`db-filter-btn ${timeRange === 'pick_month' ? 'active' : ''}`}
+                  onClick={() => setTimeRange('pick_month')}
+                >
+                  By Month
+                </button>
+                <button 
+                  className={`db-filter-btn ${timeRange === 'all' ? 'active' : ''}`}
+                  onClick={() => setTimeRange('all')}
+                >
+                  All
+                </button>
+                {timeRange === 'pick_month' && (
+                  <input
+                    type="month"
+                    className={`db-month-picker ${timeRange === 'pick_month' ? 'active' : ''}`}
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                  />
+                )}
+              </div>
             </div>
             <div className="db-flow">
               <div className="db-flow-row">
@@ -511,6 +618,12 @@ const inventoryBreakdownRows = inventoryBreakdown
                 <div className="db-flow-meta">
                   <span className="db-flow-meta-label">Total given to customers</span>
                   <span className="db-flow-meta-val">{inventory.totalGivenToCustomers} units</span>
+                </div>
+              </div>
+              <div className="db-flow-row">
+                <div className="db-flow-meta">
+                  <span className="db-flow-meta-label">Total returned from customers</span>
+                  <span className="db-flow-meta-val">{inventory.totalReturnedFromCustomers} units</span>
                 </div>
               </div>
               <div className="db-flow-row">

@@ -7,9 +7,9 @@ from django.utils import timezone
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
 import json
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, date
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Q
 from django.db.models.functions import Coalesce
 from rest_framework.exceptions import ValidationError
 from .models import *
@@ -17,7 +17,7 @@ from .serializers import *
 from .permissions import IsAdminOrCreateOnly, IsAdminCanDeleteOnly
 
 
-def _build_inventory_summary():
+def _build_inventory_summary(start_date=None, end_date=None):
     totals = {
         "total_received_from_supplier": 0,
         "total_given_to_customers": 0,
@@ -28,68 +28,77 @@ def _build_inventory_summary():
         "breakdown": [],
     }
 
+    # Build filters for optional date range
+    supplier_filter = Q(category__iexact="cylinder")
+    transaction_filter = Q(category__iexact="cylinder")
+    customer_filter = Q(category__iexact="cylinder")
+    daily_sales_filter = Q(category__iexact="cylinder", refill=True)
+    
+    if start_date and end_date:
+        supplier_filter &= Q(date_received__gte=start_date, date_received__lte=end_date)
+        transaction_filter &= Q(transaction_date__gte=start_date, transaction_date__lte=end_date)
+        customer_filter &= Q(deposit_date__gte=start_date, deposit_date__lte=end_date)
+        daily_sales_filter &= Q(sale_date__gte=start_date, sale_date__lte=end_date)
+
     supplier_received = Supplier.objects.filter(
-        category__iexact="cylinder"
+        supplier_filter
     ).aggregate(total=Coalesce(Sum("quantity_received"), 0))["total"]
 
-    refilled_received = CylinderTransaction.objects.filter(
-        category__iexact="cylinder",
-        transaction_type__in=["received_refilled", "received_filled"],
-    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
-
-    totals["total_received_from_supplier"] = supplier_received + refilled_received
+    totals["total_received_from_supplier"] = supplier_received 
 
     customer_sales = Customer.objects.filter(
-        category__iexact="cylinder",
+        customer_filter,
         returned_date__isnull=True,
     ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
     daily_sales = DailySale.objects.filter(
-        category__iexact="cylinder",
-        refill=True,
+        daily_sales_filter
     ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
     empty_from_transactions = CylinderTransaction.objects.filter(
-        category__iexact="cylinder",
+        transaction_filter,
         transaction_type="received_empty"
     ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
+    # customer_filter for deposits — filter by deposit_date (already correct)
+    customer_filter = Q(category__iexact="cylinder")
+    if start_date and end_date:
+        customer_filter &= Q(deposit_date__gte=start_date, deposit_date__lte=end_date)
+
+    # returned_filter — completely separate, filter only by returned_date
+    returned_filter = Q(category__iexact="cylinder", returned_date__isnull=False)
+    if start_date and end_date:
+        returned_filter &= Q(returned_date__gte=start_date, returned_date__lte=end_date)
+    
     returned_from_customers = Customer.objects.filter(
-        category__iexact="cylinder",
-        returned_date__isnull=False
+        returned_filter
     ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
 
-    totals["total_empty_in_stock"] = empty_from_transactions + returned_from_customers
-
+    
     totals["total_given_to_customers"] = max(
         0,
-        customer_sales - empty_from_transactions,
+        customer_sales + daily_sales,
     )
 
     totals["total_sent_to_supplier"] = CylinderTransaction.objects.filter(
-        category__iexact="cylinder",
+        transaction_filter,
         transaction_type="sent_for_refill",
     ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
-
-    totals["total_empty_in_stock"] = CylinderTransaction.objects.filter(
-        category__iexact="cylinder",
-        transaction_type="received_empty"
-    ).aggregate(total=Coalesce(Sum("quantity"), 0))["total"]
-
-    totals["total_full_in_stock"] = supplier_received + refilled_received - totals["total_given_to_customers"] - totals["total_empty_in_stock"]
+    totals["total_empty_in_stock"] = empty_from_transactions + returned_from_customers - daily_sales - totals["total_sent_to_supplier"] 
     totals["total_returned_from_customers"] = empty_from_transactions + returned_from_customers
+    totals["total_full_in_stock"] = supplier_received - totals["total_given_to_customers"] 
 
     breakdown_map = {}
 
     # Step 1: Add quantities received from suppliers per item_type + cylinder_size
-    for row in Supplier.objects.filter(category__iexact="cylinder").values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity_received"), 0)):
+    for row in Supplier.objects.filter(supplier_filter).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity_received"), 0)):
         key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
         breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
         breakdown_map[key]["received"] += row["total"]
 
     # Step 2: Add refilled/received_filled from CylinderTransaction per item_type + cylinder_size
     for row in CylinderTransaction.objects.filter(
-        category__iexact="cylinder",
+        transaction_filter,
         transaction_type__in=["received_refilled", "received_filled"]
     ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
         key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
@@ -97,15 +106,14 @@ def _build_inventory_summary():
         breakdown_map[key]["refilled"] += row["total"]
 
     # Step 3: Add all customer quantities given out per item_type + cylinder_size
-    for row in Customer.objects.filter(category__iexact="cylinder").values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
+    for row in Customer.objects.filter(customer_filter).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
         key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
         breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
         breakdown_map[key]["given"] += row["total"]
 
     # Step 4: Add back returned quantities per item_type + cylinder_size
     for row in Customer.objects.filter(
-        category__iexact="cylinder",
-        returned_date__isnull=False
+        returned_filter
     ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
         key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
         breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
@@ -113,8 +121,7 @@ def _build_inventory_summary():
 
     # Step 5: Also subtract daily_sales per item_type + cylinder_size
     for row in DailySale.objects.filter(
-        category__iexact="cylinder",
-        refill=True
+        daily_sales_filter
     ).values("item_type", "cylinder_size").annotate(total=Coalesce(Sum("quantity"), 0)):
         key = (row["item_type"].strip().title(), row["cylinder_size"].strip().title())
         breakdown_map.setdefault(key, {"received": 0, "given": 0, "returned": 0, "refilled": 0})
@@ -754,5 +761,35 @@ class CylinderTransactionViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def current_inventory_summary(self, request):
-        """Get current inventory summary for dashboard"""
-        return Response(_build_inventory_summary())
+        """Get current inventory summary for dashboard with optional date filtering"""
+        time_range = request.query_params.get('time_range', 'all')
+        month = request.query_params.get('month', None)
+        
+        start_date = None
+        end_date = None
+        today = date.today()
+        
+        if time_range == 'today':
+            start_date = today
+            end_date = today
+        elif time_range == 'this_month':
+            start_date = today.replace(day=1)
+            # Calculate last day of current month
+            if today.month == 12:
+                end_date = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+            else:
+                end_date = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+        elif time_range == 'pick_month' and month:
+            # month format: "YYYY-MM"
+            try:
+                year, month_num = map(int, month.split('-'))
+                start_date = date(year, month_num, 1)
+                # Calculate last day of the month
+                if month_num == 12:
+                    end_date = date(year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    end_date = date(year, month_num + 1, 1) - timedelta(days=1)
+            except (ValueError, AttributeError):
+                pass  # Invalid month format, no filtering
+        
+        return Response(_build_inventory_summary(start_date, end_date))

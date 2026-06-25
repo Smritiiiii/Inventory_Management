@@ -7,3 +7,11 @@ __pycache__/
 .env
 staticfiles/
 media/
+
+
+# Python
+backend/.env
+backend/env/
+backend/__pycache__/
+backend/*.pyc
+node_modules/

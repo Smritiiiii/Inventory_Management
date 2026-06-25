@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import api from "../api/axios";
 import { fetchAllPages } from "../utils/paginated";
+import ExportAuditButton from "./ExportAuditButton"
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -522,17 +523,21 @@ const inventoryBreakdownRows = inventoryBreakdown
     <>
       <style>{styles}</style>
       <div className="db-root">
-
+        
         {/* header */}
         <div className="db-header">
           <div>
-            <h2>Welcome Back, <span>Smriti</span></h2>
+            <h2>Welcome Back, <span>Smriti </span></h2>
             <p>Here's what's happening with your inventory today.</p>
           </div>
-          <button className="db-refresh" onClick={fetchData}>
-            <i className="bi bi-arrow-clockwise"></i> Refresh
-          </button>
-        </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <button className="db-refresh" onClick={fetchData}>
+              <i className="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+            <ExportAuditButton />
+          </div>
+                  </div>
+        
 
         {/* 4 key stats */}
         <div className="db-stats">
@@ -682,6 +687,7 @@ const inventoryBreakdownRows = inventoryBreakdown
               </div>
             </div>
           </div>
+          
 
           {/* accessories list */}
           <div className="db-card">

@@ -1,5 +1,5 @@
 from rest_framework import viewsets, permissions, filters, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -15,6 +15,8 @@ from rest_framework.exceptions import ValidationError
 from .models import *
 from .serializers import *
 from .permissions import IsAdminOrCreateOnly, IsAdminCanDeleteOnly
+from .generate_audit import generate_audit_excel
+import io 
 
 
 def _build_inventory_summary(start_date=None, end_date=None):
@@ -793,3 +795,97 @@ class CylinderTransactionViewSet(viewsets.ModelViewSet):
                 pass  # Invalid month format, no filtering
         
         return Response(_build_inventory_summary(start_date, end_date))
+
+
+# ==================== Excel Export Views ====================
+
+@api_view(["GET"])
+@permission_classes([IsAdminOrCreateOnly])
+def export_audit_excel(request):
+    period = request.query_params.get("period", "all").lower()
+    today  = date.today()
+ 
+    if period == "today":
+        start_date   = today
+        end_date     = today
+        period_label = f"Today ({today.strftime('%d %B %Y')})"
+    elif period == "month":
+        start_date   = today.replace(day=1)
+        end_date     = today
+        period_label = today.strftime("%B %Y")
+    else:
+        start_date   = None
+        end_date     = None
+        period_label = "All Time"
+ 
+    def date_filter(start, end, date_field):
+        if start and end:
+            return Q(**{f"{date_field}__gte": start, f"{date_field}__lte": end})
+        return Q()
+ 
+    # ── Suppliers ─────────────────────────────────────────────────────────────
+    supplier_qs = Supplier.objects.filter(
+        Q(category__iexact="cylinder") & date_filter(start_date, end_date, "date_received")
+    ).order_by("date_received")
+ 
+    suppliers = list(supplier_qs.values(
+        "date_received", "supplier_name", "item_type",
+        "cylinder_size", "quantity_received", "amount_paid",
+    ))
+    for s in suppliers:
+        s["date_received"] = str(s["date_received"]) if s["date_received"] else ""
+ 
+    # ── Customers ─────────────────────────────────────────────────────────────
+    customer_qs = Customer.objects.filter(
+        Q(category__iexact="cylinder") & date_filter(start_date, end_date, "deposit_date")
+    ).order_by("deposit_date")
+ 
+    customers = list(customer_qs.values(
+        "deposit_date", "full_name", "phone", "item_type",
+        "cylinder_size", "quantity", "deposit_amount", "returned_date",
+    ))
+    for c in customers:
+        c["deposit_date"]  = str(c["deposit_date"])  if c["deposit_date"]  else ""
+        c["returned_date"] = str(c["returned_date"]) if c["returned_date"] else ""
+ 
+    # ── Daily Sales — cylinders (refill=True) ─────────────────────────────────
+    cylinder_sales_qs = DailySale.objects.filter(
+        Q(category__iexact="cylinder", refill=True)
+        & date_filter(start_date, end_date, "sale_date")
+    ).order_by("sale_date")
+ 
+    cylinder_sales = list(cylinder_sales_qs.values(
+    "sale_date", "item_type", "cylinder_size", "quantity", "amount",
+    "customer__full_name", "customer__phone",
+    ))
+    for s in cylinder_sales:
+        s["sale_date"]      = str(s["sale_date"]) if s["sale_date"] else ""
+        s["customer_name"]  = s.pop("customer__full_name") or ""
+        s["customer_phone"] = s.pop("customer__phone") or ""
+ 
+    # ── Daily Sales — accessories ─────────────────────────────────────────────
+    accessory_sales_qs = DailySale.objects.filter(
+        Q(category__iexact="accessory")
+        & date_filter(start_date, end_date, "sale_date")
+    ).order_by("sale_date")
+ 
+    accessory_sales = list(accessory_sales_qs.values(
+        "sale_date", "item_type", "quantity", "amount",
+    ))
+    for s in accessory_sales:
+        s["sale_date"] = str(s["sale_date"]) if s["sale_date"] else ""
+ 
+    # ── Generate & stream ─────────────────────────────────────────────────────
+    wb = generate_audit_excel(suppliers, customers, cylinder_sales, accessory_sales, period_label)
+ 
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+ 
+    filename = f"audit_{period}_{today.strftime('%Y%m%d')}.xlsx"
+    response = HttpResponse(
+        buffer,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response

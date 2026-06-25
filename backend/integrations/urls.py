@@ -14,6 +14,7 @@ urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
     path('auth/login/', LoginView.as_view(), name='login'),
     path('auth/current-user/', CurrentUserView.as_view(), name='current-user'),
+    path('api/audit/export/', export_audit_excel, name='export-audit'),
 ]
 
 urlpatterns += router.urls
